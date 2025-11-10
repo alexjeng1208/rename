@@ -35,12 +35,18 @@ pyinstaller --name="檔案重新命名工具" ^
     --add-data "file_renamer.py;." ^
     --add-data "config.py;." ^
     --add-data "utils.py;." ^
+    --add-data "ui_theme.py;." ^
+    --add-data "security_utils.py;." ^
+    --add-data "filename_validator.py;." ^
     --hidden-import=tkinterdnd2 ^
     --hidden-import=PIL ^
     --hidden-import=PIL.Image ^
     --hidden-import=PIL.ImageTk ^
     --hidden-import=config ^
     --hidden-import=utils ^
+    --hidden-import=ui_theme ^
+    --hidden-import=security_utils ^
+    --hidden-import=filename_validator ^
     --collect-all tkinterdnd2 ^
     --collect-all PIL ^
     file_renamer.py

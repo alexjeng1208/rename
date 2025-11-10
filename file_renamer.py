@@ -3,26 +3,42 @@ from tkinter import ttk, filedialog, messagebox
 import os
 from pathlib import Path
 import sys
-import threading
+from threading import Thread
 from datetime import datetime
 
 # 匯入配置和工具模組
 try:
     from config import (
-        config_manager, COLOR_MAP, CHAR_TYPES, THEMES,
-        SUPPORTED_EXTENSIONS, VALID_EXTENSIONS_PATTERNS,
+        config_manager, COLOR_MAP, THEMES,
+        SUPPORTED_EXTENSIONS,
         APP_NAME, DEFAULT_WINDOW_SIZE
     )
-    from utils import HistoryManager, format_file_size, get_file_info
+    from utils import HistoryManager, format_file_size
+    from ui_theme import ModernTheme
+    from security_utils import (
+        sanitize_filename, validate_file_path, safe_join_path,
+        validate_and_sanitize_new_filename, safe_rename,
+        validate_game_engine_filename
+    )
+    from filename_validator import (
+        validate_character_filename, generate_character_filename
+    )
 except ImportError:
     # 如果模組匯入失敗，使用預設值（確保能打包成EXE）
-    print("警告：無法匯入配置模組，使用預設配置")
+    # 注意：打包成EXE時不應有print輸出，但這裡保留以便調試
+    try:
+        import sys
+        if hasattr(sys, 'frozen'):  # 如果是打包後的EXE
+            pass  # 不輸出，避免控制台窗口
+        else:
+            print("警告：無法匯入配置模組，使用預設配置")
+    except:
+        pass
     COLOR_MAP = {
         "00": ("沒穿", "nude"), "01": ("黑色", "black"), "02": ("白色", "white"),
         "03": ("綠色", "green"), "04": ("紅色", "red"), "05": ("黃色", "yellow"),
         "06": ("藍色", "blue")
     }
-    CHAR_TYPES = ["Idle", "Intro", "Open"]
     THEMES = {
         "Hospital": ["H_Girlfriend", "H_Sister", "H_Cute", "H_Cool", "H_Motherly"],
         "BDSM": ["SM_Sister", "SM_Girlfriend"],
@@ -30,32 +46,62 @@ except ImportError:
         "Anime": ["A_編號"]
     }
     SUPPORTED_EXTENSIONS = ['.mp4', '.jpg', '.jpeg', '.png']
-    VALID_EXTENSIONS_PATTERNS = ['*.mp4', '*.jpg', '*.jpeg', '*.png']
     APP_NAME = "檔案重新命名工具"
     DEFAULT_WINDOW_SIZE = "1200x1000"
     config_manager = None
     HistoryManager = None
+    ModernTheme = None
+    # 安全工具函數的備用實現
+    def sanitize_filename(filename):
+        return filename.replace('/', '').replace('\\', '').replace(':', '').replace('*', '').replace('?', '').replace('"', '').replace('<', '').replace('>', '').replace('|', '')
+    def validate_file_path(file_path):
+        return True, None
+    def safe_join_path(dir_path, filename):
+        return os.path.join(dir_path, sanitize_filename(filename))
+    def validate_and_sanitize_new_filename(original_path, new_name, game_engine_mode=True):
+        return sanitize_filename(new_name, game_engine_mode=game_engine_mode), None
+    def validate_game_engine_filename(filename):
+        return True, None
+    def validate_character_filename(filename):
+        return True, None, None
+    def generate_character_filename(char_id, char_type, char_index, ext=''):
+        if ext and not ext.startswith('.'):
+            ext = '.' + ext
+        return f"Character_{str(int(char_id)).zfill(2)}_{char_type}_{str(int(char_index)).zfill(2)}{ext.lower() if ext else ''}"
+    def safe_rename(old_path, new_path):
+        try:
+            os.rename(old_path, new_path)
+            return True, None
+        except Exception as e:
+            return False, str(e)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
 except ImportError:
     HAS_DND = False
-    print("提示：未安裝tkinterdnd2，拖放功能將不可用。可使用 pip install tkinterdnd2 安裝")
+    # 打包成EXE時不輸出提示
+    try:
+        import sys
+        if not hasattr(sys, 'frozen'):
+            print("提示：未安裝tkinterdnd2，拖放功能將不可用。可使用 pip install tkinterdnd2 安裝")
+    except:
+        pass
 
 try:
     from PIL import Image, ImageTk
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
-    print("提示：未安裝Pillow，圖片預覽功能將受限。可使用 pip install Pillow 安裝")
+    # 打包成EXE時不輸出提示
+    try:
+        import sys
+        if not hasattr(sys, 'frozen'):
+            print("提示：未安裝Pillow，圖片預覽功能將受限。可使用 pip install Pillow 安裝")
+    except:
+        pass
 
-# 檢查tkinter是否可用
-try:
-    import tkinter
-except ImportError:
-    print("錯誤：此系統未安裝tkinter，請安裝Python時選擇包含tkinter的選項")
-    sys.exit(1)
+# tkinter已在第一行導入，無需重複檢查
 
 
 class FileRenamerGUI:
@@ -77,14 +123,24 @@ class FileRenamerGUI:
         self.rename_history = []  # 重命名歷史，用於撤銷
         self.dark_mode = False
         
+        # 初始化UI主題
+        if ModernTheme:
+            self.theme = ModernTheme()
+        else:
+            self.theme = None
+        
         # 初始化歷史管理器
         if HistoryManager:
             self.history_manager = HistoryManager()
         else:
             self.history_manager = None
         
-        # 搜尋過濾
-        self.search_filter = ""
+        # 預覽刷新防抖（避免過於頻繁的刷新）
+        self.preview_update_pending = False
+        
+        # 狀態追蹤
+        self.current_preview_file = None
+        self.current_preview_index = None
         
         self.setup_ui()
         self.setup_drag_drop()
@@ -95,67 +151,87 @@ class FileRenamerGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_ui(self):
-        # 選擇檔案區域
-        file_frame = ttk.LabelFrame(self.root, text="選擇檔案", padding=10)
-        file_frame.pack(fill=tk.X, padx=10, pady=5)
+        """設置現代化UI"""
+        # 應用現代化樣式
+        self.apply_modern_style()
         
-        # 第一行：按鈕
+        # 選擇檔案區域（現代化卡片）
+        file_frame = self.create_modern_card(self.root, "📁 選擇檔案", padding=16)
+        file_frame.pack(fill=tk.X, padx=12, pady=8)
+        
+        # 第一行：按鈕（現代化樣式）
         button_row = ttk.Frame(file_frame)
-        button_row.pack(fill=tk.X, pady=5)
+        button_row.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Button(button_row, text="選擇檔案", command=self.select_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_row, text="選擇資料夾", command=self.select_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_row, text="清空列表", command=self.clear_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_row, text="定位20個人物模式", command=self.setup_20_characters_mode).pack(side=tk.LEFT, padx=5)
+        self.create_modern_button(button_row, "📄 選擇檔案", self.select_files, 'primary').pack(side=tk.LEFT, padx=(0, 8))
+        self.create_modern_button(button_row, "📁 選擇資料夾", self.select_folder, 'primary').pack(side=tk.LEFT, padx=(0, 8))
+        self.create_modern_button(button_row, "🗑️ 清空列表", self.clear_files, 'secondary').pack(side=tk.LEFT, padx=(0, 8))
+        self.create_modern_button(button_row, "👥 定位20個人物模式", self.setup_20_characters_mode, 'secondary').pack(side=tk.LEFT, padx=(0, 8))
         
-        # 第二行：限制數量設定和資料夾路徑輸入
+        # 第二行：限制數量設定和資料夾路徑輸入（現代化樣式）
         control_row = ttk.Frame(file_frame)
-        control_row.pack(fill=tk.X, pady=5)
+        control_row.pack(fill=tk.X, pady=(0, 8))
         
-        ttk.Label(control_row, text="最大選擇數量（0=無限制）:").pack(side=tk.LEFT, padx=5)
+        # 左側：數量控制
+        count_frame = ttk.Frame(control_row)
+        count_frame.pack(side=tk.LEFT, padx=(0, 16))
+        
+        ttk.Label(count_frame, text="最大選擇數量（0=無限制）:", 
+                 font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 8))
         self.max_files_var = tk.StringVar(value="0")
-        max_files_entry = ttk.Entry(control_row, textvariable=self.max_files_var, width=10)
-        max_files_entry.pack(side=tk.LEFT, padx=5)
+        max_files_entry = ttk.Entry(count_frame, textvariable=self.max_files_var, width=10, style='Modern.TEntry')
+        max_files_entry.pack(side=tk.LEFT, padx=(0, 12))
         
-        ttk.Label(control_row, text="當前數量:").pack(side=tk.LEFT, padx=5)
-        self.current_count_label = ttk.Label(control_row, text="0", foreground="blue", font=("Arial", 10, "bold"))
-        self.current_count_label.pack(side=tk.LEFT, padx=5)
+        ttk.Label(count_frame, text="當前數量:", 
+                 font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 8))
+        theme_colors = self.theme.get_theme(self.dark_mode) if self.theme else {}
+        count_color = theme_colors.get('primary', '#2196F3')
+        self.current_count_label = ttk.Label(count_frame, text="0", 
+                                            foreground=count_color, 
+                                            font=self.theme.get_font('subheading') if self.theme else ('Arial', 10, 'bold'))
+        self.current_count_label.pack(side=tk.LEFT)
         
-        ttk.Label(control_row, text="|").pack(side=tk.LEFT, padx=10)
+        # 右側：資料夾路徑
+        path_frame = ttk.Frame(control_row)
+        path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        ttk.Label(control_row, text="資料夾路徑:").pack(side=tk.LEFT, padx=5)
+        ttk.Label(path_frame, text="📂 資料夾路徑:", 
+                 font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 8))
         self.folder_path_var = tk.StringVar()
-        folder_path_entry = ttk.Entry(control_row, textvariable=self.folder_path_var, width=40)
-        folder_path_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_row, text="導入", command=self.import_folder_path).pack(side=tk.LEFT, padx=5)
+        folder_path_entry = ttk.Entry(path_frame, textvariable=self.folder_path_var, width=40, style='Modern.TEntry')
+        folder_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.create_modern_button(path_frame, "導入", self.import_folder_path, 'secondary').pack(side=tk.LEFT)
         
-        # 檔案列表（支援多選和調整順序）
-        list_frame = ttk.LabelFrame(self.root, text="已選擇的檔案（可多選調整順序）", padding=10)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # 檔案列表（支援多選和調整順序）- 現代化卡片
+        list_frame = self.create_modern_card(self.root, "📋 已選擇的檔案（可多選調整順序）", padding=16)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
         
-        # 列表控制按鈕
+        # 列表控制按鈕（現代化樣式）
         list_control_frame = ttk.Frame(list_frame)
-        list_control_frame.pack(fill=tk.X, pady=5)
+        list_control_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Button(list_control_frame, text="上移", command=self.move_up).pack(side=tk.LEFT, padx=2)
-        ttk.Button(list_control_frame, text="下移", command=self.move_down).pack(side=tk.LEFT, padx=2)
-        ttk.Button(list_control_frame, text="刪除選中", command=self.remove_selected).pack(side=tk.LEFT, padx=2)
+        self.create_modern_button(list_control_frame, "⬆️ 上移", self.move_up, 'secondary').pack(side=tk.LEFT, padx=(0, 6))
+        self.create_modern_button(list_control_frame, "⬇️ 下移", self.move_down, 'secondary').pack(side=tk.LEFT, padx=(0, 6))
+        self.create_modern_button(list_control_frame, "🗑️ 刪除選中", self.remove_selected, 'secondary').pack(side=tk.LEFT, padx=(0, 12))
         
         # 添加"僅處理選中項"選項
         self.only_selected_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(list_control_frame, text="僅處理選中的檔案（多選時按順序自動排序命名）", 
+        ttk.Checkbutton(list_control_frame, 
+                       text="✓ 僅處理選中的檔案（多選時按順序自動排序命名）", 
                        variable=self.only_selected_var,
-                       command=self.on_only_selected_change).pack(side=tk.LEFT, padx=10)
+                       command=self.on_only_selected_change,
+                       font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 0))
         
-        # 搜索框
+        # 搜索框（現代化樣式）
         search_frame = ttk.Frame(list_frame)
-        search_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(search_frame, text="搜尋:").pack(side=tk.LEFT, padx=5)
+        search_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(search_frame, text="🔍 搜尋:", 
+                 font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 8))
         self.search_var = tk.StringVar()
         self.search_var.trace('w', lambda *args: self.filter_file_list())
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
-        self.search_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Button(search_frame, text="清除", command=lambda: self.search_var.set("")).pack(side=tk.LEFT, padx=2)
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30, style='Modern.TEntry')
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.create_modern_button(search_frame, "清除", lambda: self.search_var.set(""), 'secondary').pack(side=tk.LEFT)
         
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -168,33 +244,34 @@ class FileRenamerGUI:
         # 綁定選擇事件，點選時顯示預覽
         self.file_listbox.bind('<<ListboxSelect>>', self.on_file_select)
         
-        # 命名規則選擇
-        rule_frame = ttk.LabelFrame(self.root, text="命名規則", padding=10)
-        rule_frame.pack(fill=tk.X, padx=10, pady=5)
+        # 命名規則選擇（現代化卡片）
+        rule_frame = self.create_modern_card(self.root, "⚙️ 命名規則", padding=16)
+        rule_frame.pack(fill=tk.X, padx=12, pady=8)
         
         self.rule_var = tk.StringVar(value="character")
         ttk.Radiobutton(rule_frame, text="Character規則（輸出給客戶端）", 
                        variable=self.rule_var, value="character", 
-                       command=self.on_rule_change).pack(side=tk.LEFT, padx=10)
+                       command=lambda: (self.on_rule_change(), self.on_index_change())).pack(side=tk.LEFT, padx=10)
         ttk.Radiobutton(rule_frame, text="夢想命名規則（內部規則，供員工瀏覽）", 
                        variable=self.rule_var, value="dream", 
-                       command=self.on_rule_change).pack(side=tk.LEFT, padx=10)
+                       command=lambda: (self.on_rule_change(), self.on_index_change())).pack(side=tk.LEFT, padx=10)
         
-        # Character規則輸入區域
-        self.char_frame = ttk.LabelFrame(self.root, text="Character規則參數", padding=10)
-        self.char_frame.pack(fill=tk.X, padx=10, pady=5)
+        # Character規則輸入區域（現代化卡片）
+        self.char_frame = self.create_modern_card(self.root, "🎭 Character規則參數", padding=16)
+        self.char_frame.pack(fill=tk.X, padx=12, pady=8)
         
-        # 一鍵選擇類型選單
+        # 一鍵選擇類型選單（現代化樣式）
         quick_type_frame = ttk.Frame(self.char_frame)
-        quick_type_frame.pack(fill=tk.X, pady=5)
+        quick_type_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Label(quick_type_frame, text="一鍵選擇類型：", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(quick_type_frame, text="全部設為Idle", 
-                  command=lambda: self.set_all_type("Idle")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(quick_type_frame, text="全部設為Intro", 
-                  command=lambda: self.set_all_type("Intro")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(quick_type_frame, text="全部設為Open", 
-                  command=lambda: self.set_all_type("Open")).pack(side=tk.LEFT, padx=5)
+        ttk.Label(quick_type_frame, text="⚡ 一鍵選擇類型：", 
+                 font=self.theme.get_font('subheading') if self.theme else ('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 12))
+        self.create_modern_button(quick_type_frame, "Idle", 
+                  lambda: self.set_all_type("Idle"), 'secondary').pack(side=tk.LEFT, padx=(0, 6))
+        self.create_modern_button(quick_type_frame, "Intro", 
+                  lambda: self.set_all_type("Intro"), 'secondary').pack(side=tk.LEFT, padx=(0, 6))
+        self.create_modern_button(quick_type_frame, "Open", 
+                  lambda: self.set_all_type("Open"), 'secondary').pack(side=tk.LEFT, padx=(0, 6))
         
         char_input_frame = ttk.Frame(self.char_frame)
         char_input_frame.pack(fill=tk.X, pady=5)
@@ -203,35 +280,57 @@ class FileRenamerGUI:
         self.char_id_var = tk.StringVar(value="01")
         char_id_combo = ttk.Combobox(char_input_frame, textvariable=self.char_id_var, 
                                     values=[f"{i:02d}" for i in range(1, 100)], 
-                                    state="readonly", width=10)
+                                    state="readonly", width=10, style='Modern.TCombobox')
         char_id_combo.grid(row=0, column=1, padx=5, pady=5)
         char_id_combo.bind("<<ComboboxSelected>>", self.on_index_change)
         
         ttk.Label(char_input_frame, text="類型:").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
         self.char_type_var = tk.StringVar(value="Idle")
         char_type_combo = ttk.Combobox(char_input_frame, textvariable=self.char_type_var, 
-                                      values=["Idle", "Intro", "Open"], state="readonly", width=15)
+                                      values=["Idle", "Intro", "Open"], state="readonly", width=15, style='Modern.TCombobox')
         char_type_combo.grid(row=0, column=3, padx=5, pady=5)
         char_type_combo.bind("<<ComboboxSelected>>", lambda e: (self.on_char_type_change(e), self.on_index_change(e)))
         
         ttk.Label(char_input_frame, text="索引:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        self.char_index_var = tk.StringVar(value="01")
+        # 創建帶顏色提示的索引選項（顯示：01 - 沒穿，但值還是01）
+        # 索引01對應顏色00（沒穿），索引02對應顏色01（黑色），以此類推
+        # 顏色索引只有00-06這7個，所以索引只顯示01-07
+        index_values = []
+        for i in range(1, 8):  # 只顯示01-07，對應顏色00-06
+            index_str = f"{i:02d}"
+            color_code = f"{i-1:02d}"
+            color_name = self.color_map.get(color_code, ("", ""))[0]
+            if color_name:
+                index_values.append(f"{index_str} - {color_name}")
+            else:
+                index_values.append(index_str)
+        # 初始值設為帶顏色提示的格式
+        initial_value = index_values[0] if index_values else "01"
+        self.char_index_var = tk.StringVar(value=initial_value)
         char_index_combo = ttk.Combobox(char_input_frame, textvariable=self.char_index_var, 
-                                       values=[f"{i:02d}" for i in range(1, 21)], 
-                                       state="readonly", width=10)
-        char_index_combo.grid(row=1, column=1, padx=5, pady=5)
-        char_index_combo.bind("<<ComboboxSelected>>", self.on_index_change)
+                                       values=index_values, 
+                                       state="readonly", width=15, style='Modern.TCombobox')
+        char_index_combo.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
+        char_index_combo.bind("<<ComboboxSelected>>", lambda e: self.on_index_combo_change(e, self.char_index_var))
+        # 保存原始值映射
+        self.char_index_combo = char_index_combo
         
         # Open類型的顏色選擇（顯示中文）
+        # 初始時不顯示，避免界面飄移，等類型為Open時再顯示
         self.color_frame = ttk.Frame(self.char_frame)
-        self.color_frame.pack(fill=tk.X, padx=5, pady=5)
+        # 不立即pack，等類型為Open時再顯示
         
         ttk.Label(self.color_frame, text="開獎演出顏色索引（顯示中文，儲存為對應編號）:").pack(side=tk.LEFT, padx=5)
         self.color_var = tk.StringVar(value="00")
         for code, (chinese, english) in self.color_map.items():
             color_radio = ttk.Radiobutton(self.color_frame, text=f"{code} - {chinese}", 
-                          variable=self.color_var, value=code, command=self.on_index_change)
+                          variable=self.color_var, value=code, 
+                          command=lambda c=code: (self.color_var.set(c), self.on_index_change()))
             color_radio.pack(side=tk.LEFT, padx=5)
+        
+        # 如果初始類型是Open，顯示顏色框架
+        if self.char_type_var.get() == "Open":
+            self.color_frame.pack(fill=tk.X, padx=5, pady=5)
         
         
         # 夢想命名規則輸入區域
@@ -243,7 +342,7 @@ class FileRenamerGUI:
         
         ttk.Label(dream_input_frame, text="主題:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.theme_var = tk.StringVar(value="Hospital")
-        theme_combo = ttk.Combobox(dream_input_frame, textvariable=self.theme_var,
+        theme_combo = ttk.Combobox(dream_input_frame, textvariable=self.theme_var, style='Modern.TCombobox',
                                   values=["Hospital", "BDSM", "Bedroom", "Anime"], 
                                   state="readonly", width=15)
         theme_combo.grid(row=0, column=1, padx=5, pady=5)
@@ -251,14 +350,14 @@ class FileRenamerGUI:
         
         ttk.Label(dream_input_frame, text="角色類型:").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
         self.role_var = tk.StringVar()
-        self.role_combo = ttk.Combobox(dream_input_frame, textvariable=self.role_var, 
+        self.role_combo = ttk.Combobox(dream_input_frame, textvariable=self.role_var, style='Modern.TCombobox', 
                                        state="readonly", width=20)
         self.role_combo.grid(row=0, column=3, padx=5, pady=5)
         self.role_combo.bind("<<ComboboxSelected>>", self.on_index_change)
         
         ttk.Label(dream_input_frame, text="索引:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.dream_index_var = tk.StringVar(value="01")
-        dream_index_combo = ttk.Combobox(dream_input_frame, textvariable=self.dream_index_var, 
+        dream_index_combo = ttk.Combobox(dream_input_frame, textvariable=self.dream_index_var, style='Modern.TCombobox', 
                                         values=[f"{i:02d}" for i in range(1, 21)], 
                                         state="readonly", width=10)
         dream_index_combo.grid(row=1, column=1, padx=5, pady=5)
@@ -270,7 +369,7 @@ class FileRenamerGUI:
         
         ttk.Label(self.anime_frame, text="動漫主題編號 (A_編號):").pack(side=tk.LEFT, padx=5)
         self.anime_num_var = tk.StringVar(value="01")
-        anime_num_combo = ttk.Combobox(self.anime_frame, textvariable=self.anime_num_var, 
+        anime_num_combo = ttk.Combobox(self.anime_frame, textvariable=self.anime_num_var, style='Modern.TCombobox', 
                                        values=[f"{i:02d}" for i in range(1, 21)], 
                                        state="readonly", width=10)
         anime_num_combo.pack(side=tk.LEFT, padx=5)
@@ -297,6 +396,10 @@ class FileRenamerGUI:
         self.preview_text = tk.Text(text_preview_frame, yscrollcommand=preview_scrollbar.set, height=8)
         self.preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         preview_scrollbar.config(command=self.preview_text.yview)
+        
+        # 配置文字樣式標籤（用於顯示錯誤和成功）
+        self.preview_text.tag_config("error", foreground="red", font=("Arial", 9, "bold"))
+        self.preview_text.tag_config("success", foreground="green", font=("Arial", 9, "bold"))
         
         # 圖片預覽標籤頁
         image_preview_frame = ttk.Frame(self.preview_notebook)
@@ -344,6 +447,22 @@ class FileRenamerGUI:
         dark_mode_btn = ttk.Button(button_frame, text="深色模式 (Ctrl+T)", command=self.toggle_dark_mode)
         dark_mode_btn.pack(side=tk.LEFT, padx=5)
         self.create_tooltip(dark_mode_btn, "切換深色/淺色模式 (快捷鍵: Ctrl+T)")
+        
+        # 批量操作按鈕
+        batch_btn = ttk.Button(button_frame, text="批量設定角色編號", command=self.batch_set_char_id)
+        batch_btn.pack(side=tk.LEFT, padx=5)
+        self.create_tooltip(batch_btn, "批量為選中的檔案設定角色編號")
+        
+        # 狀態欄
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.status_label = ttk.Label(status_frame, text="就緒", relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=2)
+        
+        # 統計資訊標籤
+        self.stats_label = ttk.Label(status_frame, text="", relief=tk.SUNKEN, anchor=tk.E)
+        self.stats_label.pack(side=tk.RIGHT, padx=5, pady=2)
         
         # 初始顯示
         self.on_rule_change()
@@ -429,8 +548,17 @@ class FileRenamerGUI:
             messagebox.showerror("錯誤", f"處理拖放檔案時發生錯誤：{str(e)}")
     
     def select_files(self):
+        """選擇檔案"""
+        # 使用上次的資料夾（如果有的話）
+        initial_dir = None
+        if config_manager:
+            last_folder = config_manager.get("last_folder", "")
+            if last_folder and os.path.isdir(last_folder):
+                initial_dir = last_folder
+        
         files = filedialog.askopenfilenames(
             title="選擇檔案",
+            initialdir=initial_dir,
             filetypes=[
                 ("支援的檔案", "*.mp4;*.jpg;*.png"),
                 ("影片檔案", "*.mp4"),
@@ -439,6 +567,12 @@ class FileRenamerGUI:
             ]
         )
         if files:
+            # 記錄最後使用的資料夾
+            if config_manager and files:
+                last_folder = os.path.dirname(files[0])
+                if os.path.isdir(last_folder):
+                    config_manager.set("last_folder", last_folder)
+            
             files_to_add = [f for f in files if f not in self.selected_files]
             
             if files_to_add:
@@ -460,11 +594,26 @@ class FileRenamerGUI:
                     if f not in self.selected_files:
                         self.selected_files.append(f)
                 self.update_file_list()
+                # 更新狀態
+                self.update_status(f"已添加 {len(files_to_add)} 個檔案")
     
     def select_folder(self):
-        folder = filedialog.askdirectory(title="選擇資料夾")
+        """選擇資料夾"""
+        # 使用上次的資料夾（如果有的話）
+        initial_dir = None
+        if config_manager:
+            last_folder = config_manager.get("last_folder", "")
+            if last_folder and os.path.isdir(last_folder):
+                initial_dir = last_folder
+        
+        folder = filedialog.askdirectory(title="選擇資料夾", initialdir=initial_dir)
         if folder:
-            self.add_files_from_folder(folder)
+            # 記錄最後使用的資料夾
+            if config_manager:
+                config_manager.set("last_folder", folder)
+            added_count = self.add_files_from_folder(folder)
+            if added_count > 0:
+                self.update_status(f"從資料夾添加了 {added_count} 個檔案")
     
     def clear_files(self):
         self.selected_files = []
@@ -490,11 +639,53 @@ class FileRenamerGUI:
     def update_file_list(self):
         """更新檔案列表"""
         self.filter_file_list()
+        # 更新統計資訊
+        self.update_statistics()
+    
+    def update_statistics(self):
+        """更新統計資訊"""
+        if not hasattr(self, 'stats_label'):
+            return
+        
+        total_files = len(self.selected_files)
+        if total_files == 0:
+            self.stats_label.config(text="")
+            return
+        
+        # 統計檔案類型
+        file_types = {}
+        total_size = 0
+        for file_path in self.selected_files:
+            ext = os.path.splitext(file_path)[1].lower()
+            file_types[ext] = file_types.get(ext, 0) + 1
+            try:
+                total_size += os.path.getsize(file_path)
+            except:
+                pass
+        
+        # 格式化統計資訊
+        type_info = ", ".join([f"{ext.upper()}: {count}" for ext, count in sorted(file_types.items())])
+        try:
+            from utils import format_file_size
+            size_info = format_file_size(total_size)
+        except:
+            size_info = f"{total_size / 1024 / 1024:.2f} MB"
+        stats_text = f"總數: {total_files} | {type_info} | 大小: {size_info}"
+        self.stats_label.config(text=stats_text)
+    
+    def update_status(self, message):
+        """更新狀態欄訊息"""
+        if hasattr(self, 'status_label'):
+            self.status_label.config(text=message)
+            # 3秒後恢復為"就緒"
+            self.root.after(3000, lambda: self.status_label.config(text="就緒") if hasattr(self, 'status_label') else None)
     
     def check_max_files_limit(self, new_files_count):
         """檢查是否超過最大選擇數量限制"""
         try:
             max_files = int(self.max_files_var.get())
+            # 限制範圍在 0-10000（防止過大值）
+            max_files = max(0, min(10000, max_files))
             if max_files <= 0:
                 return True, None  # 無限制
             
@@ -506,15 +697,19 @@ class FileRenamerGUI:
             return True, None  # 如果輸入無效，視為無限制
     
     def add_files_from_folder(self, folder_path):
-        """從資料夾添加檔案"""
+        """從資料夾添加檔案（包含安全驗證）"""
+        # 驗證路徑
+        is_valid, error = validate_file_path(folder_path)
+        if not is_valid:
+            messagebox.showerror("錯誤", f"路徑無效: {error}")
+            return 0
+        
         if not os.path.isdir(folder_path):
             messagebox.showerror("錯誤", f"路徑不是有效的資料夾：{folder_path}")
             return 0
         
-        extensions = ['*.mp4', '*.jpg', '*.jpeg', '*.png']
         files_to_add = []
-        
-        for ext in extensions:
+        for ext in ['*.mp4', '*.jpg', '*.jpeg', '*.png']:
             for file_path in Path(folder_path).glob(ext):
                 file_str = str(file_path)
                 if file_str not in self.selected_files:
@@ -554,10 +749,16 @@ class FileRenamerGUI:
         return added_count
     
     def import_folder_path(self):
-        """導入資料夾路徑"""
+        """導入資料夾路徑（包含安全驗證）"""
         folder_path = self.folder_path_var.get().strip()
         if not folder_path:
             messagebox.showwarning("警告", "請輸入資料夾路徑！")
+            return
+        
+        # 驗證路徑
+        is_valid, error = validate_file_path(folder_path)
+        if not is_valid:
+            messagebox.showerror("錯誤", f"路徑無效: {error}")
             return
         
         self.add_files_from_folder(folder_path)
@@ -579,34 +780,164 @@ class FileRenamerGUI:
                 files_to_process = self.get_files_to_process()
                 if file_path in files_to_process:
                     process_index = files_to_process.index(file_path)
+                    # 立即刷新預覽
                     self.show_single_file_preview(file_path, process_index)
                 else:
                     # 如果文件不在處理列表中，使用原始索引
                     self.show_single_file_preview(file_path, selected_index)
             else:
+                # 立即刷新預覽
                 self.show_single_file_preview(file_path, selected_index)
     
     def clear_image_preview(self):
-        """清除圖片預覽"""
+        """清除圖片預覽（包含資源清理）"""
+        # 清除Canvas內容
         self.preview_canvas.delete("all")
+        
+        # 清理圖片引用以釋放內存
+        for img_id, img in list(self.preview_images.items()):
+            try:
+                del img
+            except:
+                pass
+        
+        # 清空圖片字典
         self.preview_images.clear()
+        
+        # 顯示提示標籤
         self.preview_hint_label.pack(pady=20)
     
     def show_single_file_preview(self, file_path, index):
         """顯示單個檔案的預覽"""
+        # 如果檔案和索引沒有改變，跳過刷新（優化性能）
+        if self.current_preview_file == file_path and self.current_preview_index == index:
+            # 只更新檔名（因為設定可能改變了）
+            new_name = self.generate_new_filename(file_path, index)
+            old_name = os.path.basename(file_path)
+            # 更新檔名顯示
+            self.preview_canvas.delete("filename_old", "filename_new")
+            center_x = self.preview_canvas.winfo_width() // 2
+            if center_x < 10:
+                center_x = 400
+            # 找到圖片位置
+            items = self.preview_canvas.find_all()
+            if items:
+                # 找到最後一個文字項目的位置
+                text_y = 400  # 預設位置
+                for item in items:
+                    coords = self.preview_canvas.coords(item)
+                    if coords and len(coords) >= 2:
+                        text_y = max(text_y, coords[1] + 30)
+                
+                self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
+                                              text=f"原檔名: {old_name}", 
+                                              font=("Arial", 11), tags="filename_old")
+                self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
+                                              text=f"新檔名: {new_name}", 
+                                              font=("Arial", 11, "bold"), 
+                                              fill="blue", tags="filename_new")
+            return
+        
+        # 記錄當前預覽的檔案和索引
+        self.current_preview_file = file_path
+        self.current_preview_index = index
+        
+        # 立即清除舊的預覽，確保及時刷新（包含資源清理）
+        self.preview_canvas.delete("all")
+        
+        # 清理舊的圖片引用以釋放內存
+        for img_id, img in list(self.preview_images.items()):
+            try:
+                del img
+            except:
+                pass
+        
+        self.preview_images.clear()
+        
         # 隱藏提示標籤
         self.preview_hint_label.pack_forget()
         
-        # 清除Canvas
-        self.preview_canvas.delete("all")
-        self.preview_images.clear()
+        # 立即更新視窗，確保清除操作生效
+        self.root.update_idletasks()
         
+        # 生成新檔名（使用當前設定）
         new_name = self.generate_new_filename(file_path, index)
         old_name = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[1].lower()
         
-        # 載入預覽圖片
-        preview_img = self.load_preview_image(file_path, max_size=(300, 300))
+        # 載入預覽圖片（異步載入，避免阻塞UI）
+        self._load_preview_image_async(file_path, new_name, old_name, ext)
+    
+    def _load_preview_image_async(self, file_path, new_name, old_name, ext):
+        """異步載入預覽圖片"""
+        def load_and_display():
+            preview_img = self.load_preview_image(file_path, max_size=(300, 300))
+            # 在主線程中更新UI
+            self.root.after(0, lambda: self._display_preview(preview_img, new_name, old_name, ext))
+        
+        # 在後台線程中載入圖片
+        thread = Thread(target=load_and_display, daemon=True)
+        thread.start()
+        
+        # 先顯示載入中提示
+        center_x = self.preview_canvas.winfo_width()
+        if center_x < 10:
+            center_x = 400
+        else:
+            center_x = center_x // 2
+        
+        self.preview_canvas.create_text(center_x, 200, anchor=tk.CENTER, 
+                                      text="載入中...", font=("Arial", 12))
+    
+    def _display_preview(self, preview_img, new_name, old_name, ext):
+        """顯示預覽內容"""
+        # 清除載入中提示
+        self.preview_canvas.delete("all")
+        
+        # 計算居中位置
+        canvas_width = self.preview_canvas.winfo_width()
+        if canvas_width < 10:
+            canvas_width = 400
+        center_x = canvas_width // 2
+        
+        if preview_img:
+            # 顯示預覽圖片（居中）
+            img_width = preview_img.width()
+            img_height = preview_img.height()
+            img_x = center_x - img_width // 2
+            
+            img_id = self.preview_canvas.create_image(img_x, 20, anchor=tk.NW, image=preview_img)
+            self.preview_images[img_id] = preview_img  # 保持引用
+            
+            # 如果是影片，顯示影片標記
+            if ext == '.mp4':
+                self.preview_canvas.create_text(center_x, 20 + img_height // 2, anchor=tk.CENTER, 
+                                              text="🎬 影片", font=("Arial", 16, "bold"), 
+                                              fill="white")
+            
+            # 顯示檔案名稱（在圖片下方）
+            text_y = 20 + img_height + 20
+        else:
+            # 如果無法載入預覽，顯示檔案類型標記
+            file_type = "圖片" if ext in ['.jpg', '.jpeg', '.png'] else "影片" if ext == '.mp4' else "檔案"
+            box_size = 300
+            box_x = center_x - box_size // 2
+            self.preview_canvas.create_rectangle(box_x, 20, box_x + box_size, 20 + box_size, 
+                                                outline="gray", fill="lightgray", width=2)
+            self.preview_canvas.create_text(center_x, 20 + box_size // 2, anchor=tk.CENTER, 
+                                            text=f"📄 {file_type}", font=("Arial", 16))
+            text_y = 20 + box_size + 20
+        
+        # 顯示檔案名稱
+        self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
+                                      text=f"原檔名: {old_name}", font=("Arial", 11))
+        self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
+                                      text=f"新檔名: {new_name}", font=("Arial", 11, "bold"), 
+                                      fill="blue")
+        
+        # 更新滾動區域
+        self.preview_canvas.update_idletasks()
+        self.preview_canvas.config(scrollregion=self.preview_canvas.bbox("all"))
         
         # 計算居中位置
         canvas_width = self.preview_canvas.winfo_width()
@@ -698,30 +1029,80 @@ class FileRenamerGUI:
         self.on_char_type_change()
     
     def on_rule_change(self):
+        # 使用grid或固定位置，避免界面飄移
         if self.rule_var.get() == "character":
-            self.char_frame.pack(fill=tk.X, padx=10, pady=5)
-            self.dream_frame.pack_forget()
+            if not self.char_frame.winfo_viewable():
+                self.char_frame.pack(fill=tk.X, padx=10, pady=5)
+            if self.dream_frame.winfo_viewable():
+                self.dream_frame.pack_forget()
         else:
-            self.char_frame.pack_forget()
-            self.dream_frame.pack(fill=tk.X, padx=10, pady=5)
+            if self.char_frame.winfo_viewable():
+                self.char_frame.pack_forget()
+            if not self.dream_frame.winfo_viewable():
+                self.dream_frame.pack(fill=tk.X, padx=10, pady=5)
         self.preview_text.delete(1.0, tk.END)
     
     def on_char_type_change(self, event=None):
+        # 固定顏色框架的位置，避免界面飄移
         if self.char_type_var.get() == "Open":
-            self.color_frame.pack(fill=tk.X, padx=5, pady=5)
+            if not self.color_frame.winfo_viewable():
+                # 找到char_frame中最後一個可見的子元件，在其前面插入
+                children = [w for w in self.char_frame.winfo_children() if w.winfo_viewable()]
+                if children:
+                    self.color_frame.pack(fill=tk.X, padx=5, pady=5, before=children[-1])
+                else:
+                    self.color_frame.pack(fill=tk.X, padx=5, pady=5)
         else:
-            self.color_frame.pack_forget()
+            if self.color_frame.winfo_viewable():
+                self.color_frame.pack_forget()
+        self.on_index_change()
+    
+    def on_index_combo_change(self, event, var):
+        """當索引下拉框改變時，提取數字部分並更新變數"""
+        selected_value = var.get()
+        # 如果包含" - "，提取前面的數字部分
+        if " - " in selected_value:
+            numeric_value = selected_value.split(" - ")[0]
+            var.set(numeric_value)
         self.on_index_change()
     
     def on_index_change(self, event=None):
-        """當索引選項改變時，刷新預覽"""
-        # 如果當前有選中的檔案，更新預覽
+        """當任何選項改變時，刷新預覽（包括角色編號、類型、索引、命名規則等）"""
+        # 使用防抖機制，避免過於頻繁的刷新
+        if self.preview_update_pending:
+            return
+        
+        self.preview_update_pending = True
+        self.root.after(100, self._do_index_change)  # 100ms後執行
+    
+    def _do_index_change(self):
+        """實際執行預覽更新"""
+        self.preview_update_pending = False
+        
+        # 如果當前有選中的檔案，更新圖片預覽
         selected_indices = self.file_listbox.curselection()
         if selected_indices:
             selected_index = selected_indices[0]
             if 0 <= selected_index < len(self.selected_files):
                 file_path = self.selected_files[selected_index]
-                self.show_single_file_preview(file_path, selected_index)
+                # 如果啟用了"僅處理選中項"，使用在處理列表中的索引
+                if self.only_selected_var.get():
+                    files_to_process = self.get_files_to_process()
+                    if file_path in files_to_process:
+                        process_index = files_to_process.index(file_path)
+                        self.show_single_file_preview(file_path, process_index)
+                    else:
+                        # 如果文件不在處理列表中，使用原始索引
+                        self.show_single_file_preview(file_path, selected_index)
+                else:
+                    self.show_single_file_preview(file_path, selected_index)
+        
+        # 同時更新文字預覽（如果檔案列表不為空）
+        if self.selected_files:
+            self.update_text_preview()
+        
+        # 更新統計資訊
+        self.update_statistics()
     
     def on_theme_change(self, event=None):
         theme = self.theme_var.get()
@@ -747,63 +1128,178 @@ class FileRenamerGUI:
             self.role_var.set(role_options[0])
     
     def generate_new_filename(self, original_path, index):
-        """生成新檔名"""
-        original_name = os.path.basename(original_path)
-        name, ext = os.path.splitext(original_name)
-        
-        if self.rule_var.get() == "character":
-            # 如果該檔案有設定角色編號，使用設定的編號，否則使用預設值
-            if original_path in self.file_char_id_map:
-                char_id = self.file_char_id_map[original_path].zfill(2)
+        """生成新檔名（完全符合對外格式要求：Character_{角色編號}_{類型}_{索引}.ext）"""
+        try:
+            # 獲取原始檔案的擴展名（保留原始格式，重點是前面的格式）
+            original_ext = os.path.splitext(original_path)[1]
+            if original_ext:
+                original_ext = original_ext.lower()  # 擴展名轉為小寫
             else:
-                char_id = self.char_id_var.get().zfill(2)
+                # 如果沒有擴展名，不添加擴展名（重點是前面的格式）
+                original_ext = ''
             
-            char_type = self.char_type_var.get()
+            if self.rule_var.get() == "character":
+                # 對外模式：Character_{角色編號}_{類型}_{索引}.ext
+                
+                # 1. 角色編號：確保為兩位數字（01-99）
+                if original_path in self.file_char_id_map:
+                    char_id_raw = str(self.file_char_id_map[original_path])
+                else:
+                    char_id_raw = str(self.char_id_var.get())
+                
+                # 提取數字部分並補零（添加異常處理）
+                try:
+                    char_id_digits = ''.join(filter(str.isdigit, char_id_raw))
+                    char_id_num = int(char_id_digits) if char_id_digits else 1
+                    # 限制範圍在 1-99
+                    char_id_num = max(1, min(99, char_id_num))
+                    char_id = f"{char_id_num:02d}"  # 確保兩位數字
+                except (ValueError, TypeError):
+                    # 如果轉換失敗，使用預設值
+                    char_id = "01"
+                
+                # 2. 類型：確保為 Idle, Intro, Open（大小写敏感）
+                char_type_raw = str(self.char_type_var.get())
+                valid_types = ['Idle', 'Intro', 'Open']
+                if char_type_raw in valid_types:
+                    char_type = char_type_raw
+                else:
+                    # 如果類型無效，使用預設值
+                    char_type = 'Idle'
+                
+                # 3. 索引：根據類型決定
+                if char_type == "Open":
+                    # Open類型使用顏色索引（00-06）
+                    color_raw = str(self.color_var.get())
+                    try:
+                        color_digits = ''.join(filter(str.isdigit, color_raw))
+                        char_index_num = int(color_digits) if color_digits else 0
+                        # 限制範圍在 0-6
+                        char_index_num = max(0, min(6, char_index_num))
+                        char_index = f"{char_index_num:02d}"  # 確保兩位數字，範圍00-06
+                    except (ValueError, TypeError):
+                        # 如果轉換失敗，使用預設值
+                        char_index = "00"
+                else:
+                    # Idle和Intro使用輸入的索引（01-20）
+                    index_value = str(self.char_index_var.get())
+                    # 如果包含" - "，提取前面的數字部分
+                    if " - " in index_value:
+                        index_value = index_value.split(" - ")[0]
+                    # 提取數字部分並補零（添加異常處理）
+                    try:
+                        index_digits = ''.join(filter(str.isdigit, index_value))
+                        char_index_num = int(index_digits) if index_digits else 1
+                        # 限制範圍在 1-20
+                        char_index_num = max(1, min(20, char_index_num))
+                        char_index = f"{char_index_num:02d}"  # 確保兩位數字，範圍01-20
+                    except (ValueError, TypeError):
+                        # 如果轉換失敗，使用預設值
+                        char_index = "01"
+                
+                # 使用專用的生成函數確保格式完全精確
+                new_name = generate_character_filename(
+                    char_id=char_id,
+                    char_type=char_type,
+                    char_index=char_index,
+                    ext=original_ext
+                )
+                
+                # 驗證生成的文件名是否符合Character格式
+                is_valid, validation_error, parsed_data = validate_character_filename(new_name)
+                if not is_valid:
+                    # 如果驗證失敗，記錄錯誤但繼續使用生成的文件名
+                    # 因為generate_character_filename已經確保了格式正確
+                    # 打包成EXE時不輸出調試信息
+                    try:
+                        import sys
+                        if not hasattr(sys, 'frozen'):
+                            print(f"警告：文件名驗證失敗: {validation_error}")
+                    except:
+                        pass
+                
+                # Character規則不需要額外清理（因為格式已經完全精確）
+                return new_name
+            else:  # dream rule
+                theme = str(self.theme_var.get())
+                dream_index = str(self.dream_index_var.get()).zfill(2)
+                
+                if theme == "Anime":
+                    anime_num = str(self.anime_num_var.get()).zfill(2)
+                    # 確保格式精確：A_XX.ext
+                    new_name = f"A_{anime_num}{original_ext}"
+                else:
+                    role = str(self.role_var.get())
+                    # 確保格式精確：Role_XX.ext
+                    new_name = f"{role}_{dream_index}{original_ext}"
             
-            if char_type == "Open":
-                # Open類型使用顏色索引
-                char_index = self.color_var.get()
-            else:
-                # Idle和Intro使用輸入的索引
-                char_index = self.char_index_var.get().zfill(2)
+            # 使用遊戲引擎模式驗證和清理檔案名
+            sanitized_name, error = validate_and_sanitize_new_filename(
+                original_path, new_name, game_engine_mode=True
+            )
             
-            new_name = f"Character_{char_id}_{char_type}_{char_index}{ext}"
-        else:  # dream rule
-            theme = self.theme_var.get()
-            dream_index = self.dream_index_var.get().zfill(2)
+            if error:
+                # 如果清理失敗，使用安全的備用名稱
+                safe_name = sanitize_filename(new_name, game_engine_mode=True)
+                if safe_name and safe_name != "unnamed":
+                    return safe_name
+                # 最終備用名稱
+                return f"renamed_{index:04d}{original_ext}"
             
-            if theme == "Anime":
-                anime_num = self.anime_num_var.get().zfill(2)
-                new_name = f"A_{anime_num}{ext}"
-            else:
-                role = self.role_var.get()
-                new_name = f"{role}_{dream_index}{ext}"
-        
-        return new_name
+            # 最終驗證：確保文件名完全符合遊戲引擎標準
+            is_valid, validation_error = validate_game_engine_filename(sanitized_name)
+            if not is_valid:
+                # 如果驗證失敗，使用備用名稱
+                return f"renamed_{index:04d}{original_ext}"
+            
+            return sanitized_name
+        except Exception as e:
+            # 如果生成失敗，返回安全的備用名稱
+            ext = os.path.splitext(original_path)[1].lower()
+            return f"renamed_{index:04d}{ext}"
     
     def load_preview_image(self, file_path, max_size=(200, 200)):
-        """載入預覽圖片"""
+        """載入預覽圖片（包含資源管理）"""
         try:
+            # 驗證檔案路徑
+            is_valid, error = validate_file_path(file_path)
+            if not is_valid:
+                return None
+            
+            # 檢查檔案是否存在
+            if not os.path.exists(file_path) or not os.path.isfile(file_path):
+                return None
+            
             ext = os.path.splitext(file_path)[1].lower()
             
             if ext in ['.jpg', '.jpeg', '.png']:
                 if HAS_PIL:
-                    img = Image.open(file_path)
-                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                    return ImageTk.PhotoImage(img)
+                    try:
+                        img = Image.open(file_path)
+                        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(img)
+                        # 關閉原始圖片以釋放資源
+                        img.close()
+                        return photo
+                    except Exception:
+                        return None
                 else:
                     return None
             elif ext == '.mp4':
                 # 對於影片，創建一個帶有播放圖標的預覽
                 if HAS_PIL:
-                    # 創建一個深色背景的影片圖標
-                    img = Image.new('RGB', max_size, color='#2d2d2d')
-                    # 可以在這裡添加播放圖標，但為了簡化，先使用純色背景
-                    return ImageTk.PhotoImage(img)
+                    try:
+                        # 創建一個深色背景的影片圖標
+                        img = Image.new('RGB', max_size, color='#2d2d2d')
+                        photo = ImageTk.PhotoImage(img)
+                        # 關閉圖片以釋放資源
+                        img.close()
+                        return photo
+                    except Exception:
+                        return None
                 else:
                     return None
-        except Exception as e:
-            print(f"載入預覽圖片失敗: {str(e)}")
+        except Exception:
             return None
     
     def get_files_to_process(self):
@@ -842,18 +1338,55 @@ class FileRenamerGUI:
         # 同時刷新文字預覽（不顯示警告）
         files_to_process = self.get_files_to_process()
         if files_to_process:
-            # 文字預覽
+            # 文字預覽（包含遊戲引擎標準驗證）
             self.preview_text.delete(1.0, tk.END)
+            validation_errors = []
+            
             for i, file_path in enumerate(files_to_process):
                 new_name = self.generate_new_filename(file_path, i)
                 old_name = os.path.basename(file_path)
                 dir_path = os.path.dirname(file_path)
-                new_path = os.path.join(dir_path, new_name)
+                new_path = safe_join_path(dir_path, new_name)
                 
-                self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
-                self.preview_text.insert(tk.END, f"新檔名: {new_name}\n")
+                # 驗證文件名（Character規則使用專用驗證）
+                if self.rule_var.get() == "character":
+                    is_valid, error, parsed = validate_character_filename(new_name)
+                    if is_valid:
+                        validation_status = "✓"
+                        # 顯示解析的詳細信息
+                        self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                        self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n", "success")
+                        self.preview_text.insert(tk.END, 
+                            f"  角色編號: {parsed['char_id']}, 類型: {parsed['char_type']}, "
+                            f"索引: {parsed['char_index']}, 擴展名: {parsed['ext']}\n")
+                    else:
+                        validation_status = "✗"
+                        self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                        self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
+                        self.preview_text.insert(tk.END, f"  ⚠️ 格式驗證失敗: {error}\n", "error")
+                        validation_errors.append(f"{old_name}: {error}")
+                else:
+                    # 夢想規則使用遊戲引擎標準驗證
+                    is_valid, error = validate_game_engine_filename(new_name)
+                    validation_status = "✓" if is_valid else "✗"
+                    self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                    self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
+                    if not is_valid:
+                        self.preview_text.insert(tk.END, f"  ⚠️ 驗證失敗: {error}\n", "error")
+                        validation_errors.append(f"{old_name}: {error}")
+                
                 self.preview_text.insert(tk.END, f"完整路徑: {new_path}\n")
                 self.preview_text.insert(tk.END, "-" * 60 + "\n")
+            
+            # 如果有驗證錯誤，顯示警告
+            if validation_errors:
+                error_msg = "\n".join(validation_errors[:5])
+                if len(validation_errors) > 5:
+                    error_msg += f"\n...還有 {len(validation_errors)-5} 個錯誤"
+                messagebox.showwarning("文件名驗證警告", 
+                    f"以下文件名不符合遊戲引擎標準：\n\n{error_msg}\n\n"
+                    f"文件名只能包含：字母（A-Z, a-z）、數字（0-9）、下劃線（_）、連字符（-）\n"
+                    f"擴展名必須為小寫，文件名長度不能超過128字符")
     
     def preview_rename(self):
         """預覽重新命名結果"""
@@ -865,19 +1398,8 @@ class FileRenamerGUI:
                 messagebox.showwarning("警告", "請先選擇檔案！")
             return
         
-        # 文字預覽
-        self.preview_text.delete(1.0, tk.END)
-        
-        for i, file_path in enumerate(files_to_process):
-            new_name = self.generate_new_filename(file_path, i)
-            old_name = os.path.basename(file_path)
-            dir_path = os.path.dirname(file_path)
-            new_path = os.path.join(dir_path, new_name)
-            
-            self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
-            self.preview_text.insert(tk.END, f"新檔名: {new_name}\n")
-            self.preview_text.insert(tk.END, f"完整路徑: {new_path}\n")
-            self.preview_text.insert(tk.END, "-" * 60 + "\n")
+        # 更新文字預覽
+        self.update_text_preview()
         
         # 如果當前有選中的檔案，更新圖片預覽
         selected_indices = self.file_listbox.curselection()
@@ -910,9 +1432,31 @@ class FileRenamerGUI:
         
         if result is True:  # 覆蓋
             try:
-                os.remove(new_path)  # 刪除現有檔案
-                os.rename(old_path, new_path)
-                return "success"
+                # 驗證路徑
+                is_valid, error = validate_file_path(old_path)
+                if not is_valid:
+                    messagebox.showerror("錯誤", f"原始路徑無效: {error}")
+                    return "error"
+                
+                is_valid, error = validate_file_path(new_path)
+                if not is_valid:
+                    messagebox.showerror("錯誤", f"目標路徑無效: {error}")
+                    return "error"
+                
+                # 檢查原始檔案是否存在
+                if not os.path.exists(old_path):
+                    messagebox.showerror("錯誤", "原始檔案不存在")
+                    return "error"
+                
+                # 使用安全的重命名（safe_rename 內部會處理衝突）
+                # 注意：safe_rename 會檢查目標文件是否存在，這裡不需要單獨刪除
+                # 避免競態條件：在檢查和刪除之間，文件可能被修改
+                success, error_msg = safe_rename(old_path, new_path)
+                if success:
+                    return "success"
+                else:
+                    messagebox.showerror("錯誤", f"覆蓋失敗：{error_msg or '未知錯誤'}")
+                    return "error"
             except Exception as e:
                 messagebox.showerror("錯誤", f"覆蓋失敗：{str(e)}")
                 return "error"
@@ -934,17 +1478,46 @@ class FileRenamerGUI:
         # 先預覽，確認無誤
         rename_list = []
         conflicts = []
+        errors = []  # 預先定義errors列表
         
         for i, file_path in enumerate(files_to_process):
-            new_name = self.generate_new_filename(file_path, i)
-            dir_path = os.path.dirname(file_path)
-            new_path = os.path.join(dir_path, new_name)
-            
-            # 檢查新檔名是否已存在
-            if os.path.exists(new_path) and new_path != file_path:
-                conflicts.append((file_path, new_path))
-            else:
-                rename_list.append((file_path, new_path))
+            try:
+                # 驗證原始檔案路徑
+                is_valid, error = validate_file_path(file_path)
+                if not is_valid:
+                    errors.append(f"{os.path.basename(file_path)}: {error}")
+                    continue
+                
+                # 檢查檔案是否存在
+                if not os.path.exists(file_path):
+                    errors.append(f"{os.path.basename(file_path)}: 檔案不存在")
+                    continue
+                
+                # 檢查是否為檔案（不是目錄）
+                if not os.path.isfile(file_path):
+                    errors.append(f"{os.path.basename(file_path)}: 不是檔案")
+                    continue
+                
+                new_name = self.generate_new_filename(file_path, i)
+                dir_path = os.path.dirname(file_path)
+                
+                # 使用安全的路徑連接
+                new_path = safe_join_path(dir_path, new_name)
+                
+                # 檢查新檔名是否已存在
+                if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(file_path):
+                    conflicts.append((file_path, new_path))
+                else:
+                    rename_list.append((file_path, new_path))
+            except Exception as e:
+                errors.append(f"{os.path.basename(file_path)}: {str(e)}")
+        
+        # 如果有錯誤，顯示錯誤訊息
+        if errors:
+            error_details = "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_details += f"\n...還有 {len(errors)-5} 個錯誤"
+            messagebox.showwarning("警告", f"以下檔案無法處理：\n{error_details}")
         
         # 如果有衝突，先處理衝突
         if conflicts:
@@ -986,22 +1559,25 @@ class FileRenamerGUI:
         
         for i, (old_path, new_path) in enumerate(rename_list):
             try:
-                if os.path.exists(new_path) and new_path != old_path:
-                    # 如果目標檔案存在且不是同一個檔案，跳過（應該已經處理過了）
-                    continue
-                os.rename(old_path, new_path)
-                success_count += 1
+                # 使用安全的重命名函數
+                success, error_msg = safe_rename(old_path, new_path)
                 
-                # 記錄歷史
-                self.rename_history.append({
-                    'old_path': old_path,
-                    'new_path': new_path,
-                    'timestamp': datetime.now().isoformat()
-                })
-                
-                # 更新歷史管理器
-                if self.history_manager:
-                    self.history_manager.add_record(old_path, new_path)
+                if success:
+                    success_count += 1
+                    
+                    # 記錄歷史
+                    self.rename_history.append({
+                        'old_path': old_path,
+                        'new_path': new_path,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
+                    # 更新歷史管理器
+                    if self.history_manager:
+                        self.history_manager.add_record(old_path, new_path)
+                else:
+                    error_count += 1
+                    errors.append(f"{os.path.basename(old_path)}: {error_msg or '重命名失敗'}")
                 
             except Exception as e:
                 error_count += 1
@@ -1009,8 +1585,11 @@ class FileRenamerGUI:
             
             # 更新進度條
             progress_bar['value'] = i + 1
-            progress_label.config(text=f"正在處理 {i+1}/{len(rename_list)}...")
+            progress_label.config(text=f"正在處理 {i+1}/{len(rename_list)}... ({os.path.basename(old_path)})")
             progress_window.update()
+            # 更新狀態欄
+            if hasattr(self, 'status_label'):
+                self.status_label.config(text=f"正在處理: {os.path.basename(old_path)}")
         
         # 關閉進度視窗
         progress_window.destroy()
@@ -1024,6 +1603,9 @@ class FileRenamerGUI:
             messagebox.showwarning("完成", f"{message}\n\n錯誤詳情：\n{error_details}")
         else:
             messagebox.showinfo("完成", message)
+        
+        # 更新狀態欄
+        self.update_status(f"重新命名完成：成功 {success_count} 個，失敗 {error_count} 個")
         
         # 清空列表
         self.clear_files()
@@ -1100,6 +1682,51 @@ class FileRenamerGUI:
         
         ttk.Button(setup_window, text="應用設定", command=apply_settings).pack(pady=10)
     
+    def batch_set_char_id(self):
+        """批量設定角色編號"""
+        selected_indices = self.file_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("警告", "請先選擇要設定的檔案！")
+            return
+        
+        # 創建批量設定視窗
+        batch_window = tk.Toplevel(self.root)
+        batch_window.title("批量設定角色編號")
+        batch_window.geometry("400x200")
+        batch_window.transient(self.root)
+        batch_window.grab_set()
+        
+        ttk.Label(batch_window, text=f"為 {len(selected_indices)} 個選中的檔案設定角色編號", 
+                 font=("Arial", 10, "bold")).pack(pady=10)
+        
+        input_frame = ttk.Frame(batch_window)
+        input_frame.pack(pady=10)
+        
+        ttk.Label(input_frame, text="角色編號:").pack(side=tk.LEFT, padx=5)
+        batch_char_id_var = tk.StringVar(value="01")
+        batch_char_id_combo = ttk.Combobox(input_frame, textvariable=batch_char_id_var, style='Modern.TCombobox', 
+                                          values=[f"{i:02d}" for i in range(1, 100)], 
+                                          state="readonly", width=10)
+        batch_char_id_combo.pack(side=tk.LEFT, padx=5)
+        
+        def apply_batch_settings():
+            char_id = batch_char_id_var.get()
+            for idx in selected_indices:
+                if 0 <= idx < len(self.selected_files):
+                    file_path = self.selected_files[idx]
+                    self.file_char_id_map[file_path] = char_id
+            messagebox.showinfo("完成", f"已為 {len(selected_indices)} 個檔案設定角色編號：{char_id}")
+            batch_window.destroy()
+            # 刷新預覽
+            self.on_index_change()
+            self.update_status(f"已批量設定 {len(selected_indices)} 個檔案的角色編號")
+        
+        button_frame = ttk.Frame(batch_window)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text="應用", command=apply_batch_settings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="取消", command=batch_window.destroy).pack(side=tk.LEFT, padx=5)
+    
     def setup_keyboard_shortcuts(self):
         """設定鍵盤快捷鍵"""
         # Ctrl+O: 選擇檔案
@@ -1134,7 +1761,20 @@ class FileRenamerGUI:
         if hasattr(self, 'char_id_var'):
             self.char_id_var.set(config_manager.get("last_char_id", "01"))
             self.char_type_var.set(config_manager.get("last_char_type", "Idle"))
-            self.char_index_var.set(config_manager.get("last_char_index", "01"))
+            # 載入索引時，需要更新下拉框顯示值（帶顏色提示）
+            saved_index = config_manager.get("last_char_index", "01")
+            # 更新下拉框顯示值（帶顏色提示）
+            if hasattr(self, 'char_index_combo'):
+                index_values = self.char_index_combo['values']
+                for val in index_values:
+                    if val.startswith(saved_index + " - "):
+                        self.char_index_var.set(val)
+                        break
+                else:
+                    # 如果找不到匹配的，使用純數字
+                    self.char_index_var.set(saved_index)
+            else:
+                self.char_index_var.set(saved_index)
             self.color_var.set(config_manager.get("last_color", "00"))
         
         # 載入夢想規則設定
@@ -1168,7 +1808,13 @@ class FileRenamerGUI:
         if hasattr(self, 'char_id_var'):
             config_manager.set("last_char_id", self.char_id_var.get())
             config_manager.set("last_char_type", self.char_type_var.get())
-            config_manager.set("last_char_index", self.char_index_var.get())
+            # 儲存索引時，只儲存數字部分（不包含顏色提示）
+            index_value = self.char_index_var.get()
+            if " - " in index_value:
+                numeric_index = index_value.split(" - ")[0]
+            else:
+                numeric_index = index_value
+            config_manager.set("last_char_index", numeric_index)
             config_manager.set("last_color", self.color_var.get())
         
         # 儲存夢想規則設定
@@ -1188,9 +1834,28 @@ class FileRenamerGUI:
         config_manager.save_config()
     
     def on_closing(self):
-        """視窗關閉時的處理"""
-        self.save_settings()
-        self.root.destroy()
+        """視窗關閉時的處理（包含資源清理）"""
+        try:
+            # 清理圖片資源
+            if hasattr(self, 'preview_images'):
+                for img_id, img in list(self.preview_images.items()):
+                    try:
+                        del img
+                    except:
+                        pass
+                self.preview_images.clear()
+            
+            # 保存設定
+            self.save_settings()
+            
+            # 銷毀視窗
+            self.root.destroy()
+        except Exception:
+            # 即使清理失敗，也要關閉視窗
+            try:
+                self.root.destroy()
+            except:
+                pass
     
     def undo_rename(self):
         """撤銷最後一次重命名操作"""
@@ -1204,8 +1869,11 @@ class FileRenamerGUI:
         new_path = last_rename['old_path']
         
         try:
-            if os.path.exists(old_path):
-                os.rename(old_path, new_path)
+            # 使用安全的重命名函數
+            success, error_msg = safe_rename(old_path, new_path)
+            
+            if success:
+                self.update_status(f"已撤銷重命名：{os.path.basename(old_path)} -> {os.path.basename(new_path)}")
                 messagebox.showinfo("成功", f"已撤銷重命名：\n{os.path.basename(old_path)} -> {os.path.basename(new_path)}")
                 # 更新歷史記錄
                 if self.history_manager:
@@ -1213,8 +1881,11 @@ class FileRenamerGUI:
                 # 重新整理檔案列表
                 self.update_file_list()
             else:
-                messagebox.showwarning("警告", "檔案不存在，無法撤銷")
+                error_msg = error_msg or "撤銷失敗"
+                self.update_status(f"撤銷失敗：{error_msg}")
+                messagebox.showerror("錯誤", f"撤銷失敗：{error_msg}")
         except Exception as e:
+            self.update_status(f"撤銷失敗：{str(e)}")
             messagebox.showerror("錯誤", f"撤銷失敗：{str(e)}")
     
     def focus_search(self):
@@ -1222,49 +1893,135 @@ class FileRenamerGUI:
         if hasattr(self, 'search_entry'):
             self.search_entry.focus()
     
+    def apply_modern_style(self):
+        """應用現代化樣式"""
+        if not self.theme:
+            return
+        
+        theme_colors = self.theme.get_theme(self.dark_mode)
+        
+        # 設置主視窗背景
+        self.root.configure(bg=theme_colors['bg_secondary'])
+        
+        # 配置ttk樣式
+        style = ttk.Style()
+        
+        # 配置主題
+        style.theme_use('clam')
+        
+        # 配置LabelFrame樣式（卡片效果）
+        style.configure('Card.TLabelframe',
+                      background=theme_colors['card_bg'],
+                      borderwidth=1,
+                      relief='flat',
+                      bordercolor=theme_colors['divider'])
+        style.configure('Card.TLabelframe.Label',
+                      background=theme_colors['card_bg'],
+                      foreground=theme_colors['text_primary'],
+                      font=self.theme.get_font('subheading'))
+        
+        # 配置按鈕樣式
+        style.configure('Primary.TButton',
+                      background=theme_colors['button_bg'],
+                      foreground=theme_colors['button_text'],
+                      borderwidth=0,
+                      focuscolor='none',
+                      padding=(16, 8),
+                      font=self.theme.get_font('button'))
+        style.map('Primary.TButton',
+                 background=[('active', theme_colors['button_hover']),
+                           ('pressed', theme_colors['primary_dark'])])
+        
+        style.configure('Secondary.TButton',
+                      background=theme_colors['button_secondary_bg'],
+                      foreground=theme_colors['button_secondary_text'],
+                      borderwidth=0,
+                      focuscolor='none',
+                      padding=(12, 6),
+                      font=self.theme.get_font('body'))
+        style.map('Secondary.TButton',
+                 background=[('active', theme_colors['button_secondary_hover'])])
+        
+        # 配置Entry樣式
+        style.configure('Modern.TEntry',
+                      fieldbackground=theme_colors['bg_primary'],
+                      foreground=theme_colors['text_primary'],
+                      borderwidth=1,
+                      relief='solid',
+                      padding=8,
+                      bordercolor=theme_colors['border'])
+        style.map('Modern.TEntry',
+                 bordercolor=[('focus', theme_colors['primary'])])
+        
+        # 配置Combobox樣式
+        style.configure('Modern.TCombobox',
+                      fieldbackground=theme_colors['bg_primary'],
+                      foreground=theme_colors['text_primary'],
+                      borderwidth=1,
+                      relief='solid',
+                      padding=6,
+                      bordercolor=theme_colors['border'],
+                      arrowcolor=theme_colors['text_primary'])
+        style.map('Modern.TCombobox',
+                 bordercolor=[('focus', theme_colors['primary'])],
+                 fieldbackground=[('readonly', theme_colors['bg_primary'])])
+    
+    def create_modern_card(self, parent, title, padding=16):
+        """創建現代化卡片容器"""
+        card = ttk.LabelFrame(parent, text=title, padding=padding, style='Card.TLabelframe')
+        return card
+    
+    def create_modern_button(self, parent, text, command, style_type='primary', **kwargs):
+        """創建現代化按鈕"""
+        style_name = 'Primary.TButton' if style_type == 'primary' else 'Secondary.TButton'
+        btn = ttk.Button(parent, text=text, command=command, style=style_name, **kwargs)
+        return btn
+    
     def toggle_dark_mode(self):
         """切換深色模式"""
         self.dark_mode = not self.dark_mode
         
-        if self.dark_mode:
-            # 深色模式顏色
-            bg_color = "#2b2b2b"
-            fg_color = "#ffffff"
-            select_bg = "#404040"
-            select_fg = "#ffffff"
-        else:
-            # 淺色模式顏色
-            bg_color = "#f0f0f0"
-            fg_color = "#000000"
-            select_bg = "#0078d4"
-            select_fg = "#ffffff"
+        # 重新應用樣式
+        self.apply_modern_style()
+        
+        # 更新所有UI元素
+        if not self.theme:
+            return
+        
+        theme_colors = self.theme.get_theme(self.dark_mode)
         
         # 更新主視窗背景
-        self.root.configure(bg=bg_color)
+        self.root.configure(bg=theme_colors['bg_secondary'])
         
         # 更新Listbox樣式
         if hasattr(self, 'file_listbox'):
             self.file_listbox.configure(
-                bg=bg_color if not self.dark_mode else "#1e1e1e",
-                fg=fg_color,
-                selectbackground=select_bg,
-                selectforeground=select_fg
+                bg=theme_colors['bg_primary'],
+                fg=theme_colors['text_primary'],
+                selectbackground=theme_colors['primary'],
+                selectforeground=theme_colors['button_text'],
+                font=self.theme.get_font('body')
             )
         
         # 更新Text元件樣式
         if hasattr(self, 'preview_text'):
             self.preview_text.configure(
-                bg=bg_color if not self.dark_mode else "#1e1e1e",
-                fg=fg_color,
-                insertbackground=fg_color
+                bg=theme_colors['bg_primary'],
+                fg=theme_colors['text_primary'],
+                insertbackground=theme_colors['primary']
             )
+        
+        # 更新Canvas背景
+        if hasattr(self, 'preview_canvas'):
+            self.preview_canvas.configure(bg=theme_colors['bg_primary'])
         
         # 儲存設定
         if config_manager:
             config_manager.set("dark_mode", self.dark_mode)
             config_manager.save_config()
         
-        messagebox.showinfo("提示", f"已切換到{'深色' if self.dark_mode else '淺色'}模式")
+        # 更新狀態
+        self.update_status(f"已切換到{'深色' if self.dark_mode else '淺色'}模式")
     
     def create_tooltip(self, widget, text):
         """建立工具提示"""

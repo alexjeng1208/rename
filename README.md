@@ -193,21 +193,33 @@
 
 已更新打包配置，包含所有新模組：
 - `config.py` - 配置管理模組
-- `utils.py` - 工具函數模組
+- `utils.py` - 工具函數模組（歷史記錄管理）
+- `ui_theme.py` - UI主題模組（深色模式）
+- `security_utils.py` - 安全工具模組（路徑驗證、文件名清理）
+- `filename_validator.py` - 文件名驗證模組（Character格式驗證）
 
 ## 專案結構
 
 ```
 file_renamer_tool/
-├── file_renamer.py      # 主程式檔案
-├── config.py            # 配置管理模組
-├── utils.py             # 工具函數模組
-├── build_exe.bat        # 打包批處理檔案
-├── build_exe.spec       # PyInstaller配置檔案
-├── 檔案重新命名工具.spec  # PyInstaller配置檔案
-├── requirements.txt     # 依賴套件列表
-├── README.md           # 說明文件
-└── 打包說明.md          # 打包說明文件
+├── file_renamer.py          # 主程式檔案
+├── config.py                # 配置管理模組
+├── utils.py                 # 工具函數模組（歷史記錄管理）
+├── ui_theme.py              # UI主題模組（深色模式）
+├── security_utils.py        # 安全工具模組（路徑驗證、文件名清理）
+├── filename_validator.py    # 文件名驗證模組（Character格式驗證）
+├── build_exe.bat            # 打包批處理檔案
+├── build_exe.spec           # PyInstaller配置檔案
+├── 檔案重新命名工具.spec      # PyInstaller配置檔案
+├── requirements.txt         # 依賴套件列表
+├── stress_test.py           # 壓力測試腳本
+├── user_error_simulation.py # 用戶錯誤操作模擬
+├── run_stress_tests.bat     # 批量運行測試
+├── README.md                # 說明文件
+├── 打包說明.md               # 打包說明文件
+├── 優化說明.md               # 優化說明文件
+├── TEST_SUMMARY.md          # 測試總結報告
+└── security_audit_report.md # 安全審計報告
 ```
 
 ## 配置檔案位置
@@ -258,6 +270,11 @@ file_renamer_tool/
 - 🔧 索引改為固定選項（下拉選單）
 - 🔧 選項改變時自動刷新預覽
 - 🔧 程式碼重構為模組化結構
+- 🔒 新增安全驗證功能（路徑遍歷防護、文件名驗證）
+- 🔒 新增文件名格式驗證（Character規則精確驗證）
+- 🔒 新增資源管理優化（防止內存泄漏）
+- 🧪 新增壓力測試腳本
+- 🧪 新增用戶錯誤操作模擬
 - 📝 所有文字改為繁體中文
 
 ### v1.0.0

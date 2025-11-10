@@ -216,11 +216,11 @@ class FileRenamerGUI:
         
         # 添加"僅處理選中項"選項
         self.only_selected_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(list_control_frame, 
+        only_selected_check = ttk.Checkbutton(list_control_frame, 
                        text="✓ 僅處理選中的檔案（多選時按順序自動排序命名）", 
                        variable=self.only_selected_var,
-                       command=self.on_only_selected_change,
-                       font=self.theme.get_font('body') if self.theme else ('Arial', 10)).pack(side=tk.LEFT, padx=(0, 0))
+                       command=self.on_only_selected_change)
+        only_selected_check.pack(side=tk.LEFT, padx=(0, 0))
         
         # 搜索框（現代化樣式）
         search_frame = ttk.Frame(list_frame)

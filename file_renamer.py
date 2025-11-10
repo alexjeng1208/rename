@@ -6,6 +6,9 @@ import sys
 from threading import Thread
 from datetime import datetime
 
+# 檢測是否在打包後的EXE中運行
+IN_EXE = getattr(sys, 'frozen', False)
+
 # 匯入配置和工具模組
 try:
     from config import (
@@ -155,8 +158,57 @@ class FileRenamerGUI:
         # 應用現代化樣式
         self.apply_modern_style()
         
+        # 創建主滾動框架
+        # 創建 Canvas 和 Scrollbar 用於整個窗口滾動
+        main_canvas_frame = ttk.Frame(self.root)
+        main_canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 創建垂直滾動條
+        main_scrollbar = ttk.Scrollbar(main_canvas_frame, orient=tk.VERTICAL)
+        main_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 創建 Canvas
+        self.main_canvas = tk.Canvas(main_canvas_frame, yscrollcommand=main_scrollbar.set)
+        self.main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        main_scrollbar.config(command=self.main_canvas.yview)
+        
+        # 創建內容框架（所有內容都放在這裡）
+        self.content_frame = ttk.Frame(self.main_canvas)
+        self.main_canvas_window = self.main_canvas.create_window((0, 0), window=self.content_frame, anchor=tk.NW)
+        
+        # 綁定 Canvas 大小變化事件
+        def on_canvas_configure(event):
+            # 設置內容框架寬度等於 Canvas 寬度
+            canvas_width = event.width
+            self.main_canvas.itemconfig(self.main_canvas_window, width=canvas_width)
+            # 更新 Canvas 滾動區域
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        
+        self.main_canvas.bind('<Configure>', on_canvas_configure)
+        
+        # 綁定鼠標滾輪事件
+        def on_mousewheel(event):
+            # 檢查鼠標是否在 Canvas 上
+            if self.main_canvas.winfo_containing(event.x_root, event.y_root):
+                self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self.main_canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        # 綁定內容框架大小變化事件
+        def on_content_configure(event):
+            # 更新 Canvas 滾動區域
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        
+        self.content_frame.bind('<Configure>', on_content_configure)
+        
+        # 在設置完所有內容後，更新一次滾動區域
+        def update_scroll_region():
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        
+        self.root.after(100, update_scroll_region)
+        
         # 選擇檔案區域（現代化卡片）
-        file_frame = self.create_modern_card(self.root, "📁 選擇檔案", padding=16)
+        file_frame = self.create_modern_card(self.content_frame, "📁 選擇檔案", padding=16)
         file_frame.pack(fill=tk.X, padx=12, pady=8)
         
         # 第一行：按鈕（現代化樣式）
@@ -203,7 +255,7 @@ class FileRenamerGUI:
         self.create_modern_button(path_frame, "導入", self.import_folder_path, 'secondary').pack(side=tk.LEFT)
         
         # 檔案列表（支援多選和調整順序）- 現代化卡片
-        list_frame = self.create_modern_card(self.root, "📋 已選擇的檔案（可多選調整順序）", padding=16)
+        list_frame = self.create_modern_card(self.content_frame, "📋 已選擇的檔案（可多選調整順序）", padding=16)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
         
         # 列表控制按鈕（現代化樣式）
@@ -245,7 +297,7 @@ class FileRenamerGUI:
         self.file_listbox.bind('<<ListboxSelect>>', self.on_file_select)
         
         # 命名規則選擇（現代化卡片）
-        rule_frame = self.create_modern_card(self.root, "⚙️ 命名規則", padding=16)
+        rule_frame = self.create_modern_card(self.content_frame, "⚙️ 命名規則", padding=16)
         rule_frame.pack(fill=tk.X, padx=12, pady=8)
         
         self.rule_var = tk.StringVar(value="character")
@@ -257,7 +309,7 @@ class FileRenamerGUI:
                        command=lambda: (self.on_rule_change(), self.on_index_change())).pack(side=tk.LEFT, padx=10)
         
         # Character規則輸入區域（現代化卡片）
-        self.char_frame = self.create_modern_card(self.root, "🎭 Character規則參數", padding=16)
+        self.char_frame = self.create_modern_card(self.content_frame, "🎭 Character規則參數", padding=16)
         self.char_frame.pack(fill=tk.X, padx=12, pady=8)
         
         # 一鍵選擇類型選單（現代化樣式）
@@ -334,7 +386,7 @@ class FileRenamerGUI:
         
         
         # 夢想命名規則輸入區域
-        self.dream_frame = ttk.LabelFrame(self.root, text="夢想命名規則參數", padding=10)
+        self.dream_frame = ttk.LabelFrame(self.content_frame, text="夢想命名規則參數", padding=10)
         self.dream_frame.pack(fill=tk.X, padx=10, pady=5)
         
         dream_input_frame = ttk.Frame(self.dream_frame)
@@ -379,7 +431,7 @@ class FileRenamerGUI:
         self.on_theme_change()
         
         # 預覽區域（分為文字預覽和圖片預覽）
-        preview_frame = ttk.LabelFrame(self.root, text="預覽", padding=10)
+        preview_frame = ttk.LabelFrame(self.content_frame, text="預覽", padding=10)
         preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # 創建Notebook來切換文字和圖片預覽
@@ -424,12 +476,12 @@ class FileRenamerGUI:
         
         # 拖放提示
         if HAS_DND:
-            drop_hint = ttk.Label(self.root, text="💡 提示：可以直接拖放檔案到此視窗", 
+            drop_hint = ttk.Label(self.content_frame, text="💡 提示：可以直接拖放檔案到此視窗", 
                                  foreground="blue", font=("Arial", 9))
             drop_hint.pack(pady=5)
         
         # 按鈕區域
-        button_frame = ttk.Frame(self.root)
+        button_frame = ttk.Frame(self.content_frame)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
         preview_btn = ttk.Button(button_frame, text="預覽重新命名 (Ctrl+R)", command=self.preview_rename)
@@ -454,7 +506,7 @@ class FileRenamerGUI:
         self.create_tooltip(batch_btn, "批量為選中的檔案設定角色編號")
         
         # 狀態欄
-        status_frame = ttk.Frame(self.root)
+        status_frame = ttk.Frame(self.content_frame)
         status_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.status_label = ttk.Label(status_frame, text="就緒", relief=tk.SUNKEN, anchor=tk.W)
@@ -780,13 +832,11 @@ class FileRenamerGUI:
                 files_to_process = self.get_files_to_process()
                 if file_path in files_to_process:
                     process_index = files_to_process.index(file_path)
-                    # 立即刷新預覽
                     self.show_single_file_preview(file_path, process_index)
                 else:
                     # 如果文件不在處理列表中，使用原始索引
                     self.show_single_file_preview(file_path, selected_index)
             else:
-                # 立即刷新預覽
                 self.show_single_file_preview(file_path, selected_index)
     
     def clear_image_preview(self):
@@ -808,36 +858,7 @@ class FileRenamerGUI:
         self.preview_hint_label.pack(pady=20)
     
     def show_single_file_preview(self, file_path, index):
-        """顯示單個檔案的預覽"""
-        # 如果檔案和索引沒有改變，跳過刷新（優化性能）
-        if self.current_preview_file == file_path and self.current_preview_index == index:
-            # 只更新檔名（因為設定可能改變了）
-            new_name = self.generate_new_filename(file_path, index)
-            old_name = os.path.basename(file_path)
-            # 更新檔名顯示
-            self.preview_canvas.delete("filename_old", "filename_new")
-            center_x = self.preview_canvas.winfo_width() // 2
-            if center_x < 10:
-                center_x = 400
-            # 找到圖片位置
-            items = self.preview_canvas.find_all()
-            if items:
-                # 找到最後一個文字項目的位置
-                text_y = 400  # 預設位置
-                for item in items:
-                    coords = self.preview_canvas.coords(item)
-                    if coords and len(coords) >= 2:
-                        text_y = max(text_y, coords[1] + 30)
-                
-                self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
-                                              text=f"原檔名: {old_name}", 
-                                              font=("Arial", 11), tags="filename_old")
-                self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
-                                              text=f"新檔名: {new_name}", 
-                                              font=("Arial", 11, "bold"), 
-                                              fill="blue", tags="filename_new")
-            return
-        
+        """顯示單個檔案的預覽（完全重新加載，確保穩定性）"""
         # 記錄當前預覽的檔案和索引
         self.current_preview_file = file_path
         self.current_preview_index = index
@@ -860,130 +881,147 @@ class FileRenamerGUI:
         # 立即更新視窗，確保清除操作生效
         self.root.update_idletasks()
         
-        # 生成新檔名（使用當前設定）
-        new_name = self.generate_new_filename(file_path, index)
+        # 獲取擴展名
         old_name = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[1].lower()
         
         # 載入預覽圖片（異步載入，避免阻塞UI）
-        self._load_preview_image_async(file_path, new_name, old_name, ext)
+        # 不傳遞 new_name，讓 _display_preview 實時生成
+        self._load_preview_image_async(file_path, old_name, ext, index)
     
-    def _load_preview_image_async(self, file_path, new_name, old_name, ext):
-        """異步載入預覽圖片"""
+    def _load_preview_image_async(self, file_path, old_name, ext, index):
+        """異步載入預覽圖片（增強穩定性，防止並發問題）"""
+        # 生成唯一的加載ID，用於追踪
+        import time
+        load_id = f"{file_path}_{index}_{time.time()}"
+        self.current_load_id = load_id
+        
         def load_and_display():
-            preview_img = self.load_preview_image(file_path, max_size=(300, 300))
-            # 在主線程中更新UI
-            self.root.after(0, lambda: self._display_preview(preview_img, new_name, old_name, ext))
+            try:
+                preview_img = self.load_preview_image(file_path, max_size=(300, 300))
+                # 在主線程中更新UI，並檢查是否仍然是當前請求
+                self.root.after(0, lambda: self._display_preview(preview_img, old_name, ext, file_path, index, load_id))
+            except Exception as e:
+                # 如果加載失敗，顯示錯誤信息
+                if not IN_EXE:
+                    print(f"預覽加載錯誤: {e}")
+                self.root.after(0, lambda: self._display_preview(None, old_name, ext, file_path, index, load_id))
         
         # 在後台線程中載入圖片
         thread = Thread(target=load_and_display, daemon=True)
         thread.start()
         
         # 先顯示載入中提示
-        center_x = self.preview_canvas.winfo_width()
-        if center_x < 10:
-            center_x = 400
-        else:
-            center_x = center_x // 2
-        
-        self.preview_canvas.create_text(center_x, 200, anchor=tk.CENTER, 
-                                      text="載入中...", font=("Arial", 12))
+        try:
+            center_x = self.preview_canvas.winfo_width()
+            if center_x < 10:
+                center_x = 400
+            else:
+                center_x = center_x // 2
+            
+            self.preview_canvas.create_text(center_x, 200, anchor=tk.CENTER, 
+                                          text="載入中...", font=("Arial", 12), tags="loading")
+        except Exception as e:
+            if not IN_EXE:
+                print(f"顯示載入提示錯誤: {e}")
     
-    def _display_preview(self, preview_img, new_name, old_name, ext):
-        """顯示預覽內容"""
-        # 清除載入中提示
-        self.preview_canvas.delete("all")
-        
-        # 計算居中位置
-        canvas_width = self.preview_canvas.winfo_width()
-        if canvas_width < 10:
-            canvas_width = 400
-        center_x = canvas_width // 2
-        
-        if preview_img:
-            # 顯示預覽圖片（居中）
-            img_width = preview_img.width()
-            img_height = preview_img.height()
-            img_x = center_x - img_width // 2
+    def _display_preview(self, preview_img, old_name, ext, file_path, index, load_id):
+        """顯示預覽內容（增強穩定性，實時生成文件名）"""
+        try:
+            # 檢查這是否仍然是當前請求的預覽
+            if not hasattr(self, 'current_load_id') or self.current_load_id != load_id:
+                # 這是一個過時的請求，忽略它
+                if not IN_EXE:
+                    print(f"忽略過時的預覽請求: {file_path}")
+                return
             
-            img_id = self.preview_canvas.create_image(img_x, 20, anchor=tk.NW, image=preview_img)
-            self.preview_images[img_id] = preview_img  # 保持引用
+            # 檢查當前預覽的檔案是否仍然是這個檔案
+            if self.current_preview_file != file_path:
+                # 用戶已經切換到其他檔案了，忽略這個預覽
+                if not IN_EXE:
+                    print(f"忽略過時的預覽請求（檔案已改變）: {file_path}")
+                return
             
-            # 如果是影片，顯示影片標記
-            if ext == '.mp4':
-                self.preview_canvas.create_text(center_x, 20 + img_height // 2, anchor=tk.CENTER, 
-                                              text="🎬 影片", font=("Arial", 16, "bold"), 
-                                              fill="white")
+            # 實時生成新檔名（使用當前最新的參數設定）
+            new_name = self.generate_new_filename(file_path, index)
             
-            # 顯示檔案名稱（在圖片下方）
-            text_y = 20 + img_height + 20
-        else:
-            # 如果無法載入預覽，顯示檔案類型標記
-            file_type = "圖片" if ext in ['.jpg', '.jpeg', '.png'] else "影片" if ext == '.mp4' else "檔案"
-            box_size = 300
-            box_x = center_x - box_size // 2
-            self.preview_canvas.create_rectangle(box_x, 20, box_x + box_size, 20 + box_size, 
-                                                outline="gray", fill="lightgray", width=2)
-            self.preview_canvas.create_text(center_x, 20 + box_size // 2, anchor=tk.CENTER, 
-                                            text=f"📄 {file_type}", font=("Arial", 16))
-            text_y = 20 + box_size + 20
-        
-        # 顯示檔案名稱
-        self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
-                                      text=f"原檔名: {old_name}", font=("Arial", 11))
-        self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
-                                      text=f"新檔名: {new_name}", font=("Arial", 11, "bold"), 
-                                      fill="blue")
-        
-        # 更新滾動區域
-        self.preview_canvas.update_idletasks()
-        self.preview_canvas.config(scrollregion=self.preview_canvas.bbox("all"))
-        
-        # 計算居中位置
-        canvas_width = self.preview_canvas.winfo_width()
-        if canvas_width < 10:  # 如果Canvas還沒初始化，使用預設值
-            canvas_width = 400
-        
-        center_x = canvas_width // 2
-        
-        if preview_img:
-            # 顯示預覽圖片（居中）
-            img_width = preview_img.width()
-            img_height = preview_img.height()
-            img_x = center_x - img_width // 2
+            if not IN_EXE:
+                print(f"顯示預覽: {old_name} -> {new_name}")
             
-            img_id = self.preview_canvas.create_image(img_x, 20, anchor=tk.NW, image=preview_img)
-            self.preview_images[img_id] = preview_img  # 保持引用
+            # 清除載入中提示和所有舊內容
+            self.preview_canvas.delete("all")
             
-            # 如果是影片，顯示影片標記
-            if ext == '.mp4':
-                self.preview_canvas.create_text(center_x, 20 + img_height // 2, anchor=tk.CENTER, 
-                                              text="🎬 影片", font=("Arial", 16, "bold"), 
-                                              fill="white")
+            # 計算居中位置
+            canvas_width = self.preview_canvas.winfo_width()
+            if canvas_width < 10:
+                canvas_width = 400
+            center_x = canvas_width // 2
             
-            # 顯示檔案名稱（在圖片下方）
-            text_y = 20 + img_height + 20
-        else:
-            # 如果無法載入預覽，顯示檔案類型標記
-            file_type = "圖片" if ext in ['.jpg', '.jpeg', '.png'] else "影片" if ext == '.mp4' else "檔案"
-            box_size = 300
-            box_x = center_x - box_size // 2
-            self.preview_canvas.create_rectangle(box_x, 20, box_x + box_size, 20 + box_size, 
-                                                outline="gray", fill="lightgray", width=2)
-            self.preview_canvas.create_text(center_x, 20 + box_size // 2, anchor=tk.CENTER, 
-                                            text=f"📄 {file_type}", font=("Arial", 16))
-            text_y = 20 + box_size + 20
-        
-        # 顯示檔案名稱
-        self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
-                                      text=f"原檔名: {old_name}", font=("Arial", 11))
-        self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
-                                      text=f"新檔名: {new_name}", font=("Arial", 11, "bold"), 
-                                      fill="blue")
-        
-        # 更新滾動區域
-        self.preview_canvas.update_idletasks()
-        self.preview_canvas.config(scrollregion=self.preview_canvas.bbox("all"))
+            if preview_img:
+                # 顯示預覽圖片（居中）
+                img_width = preview_img.width()
+                img_height = preview_img.height()
+                img_x = center_x - img_width // 2
+                
+                img_id = self.preview_canvas.create_image(img_x, 20, anchor=tk.NW, image=preview_img)
+                self.preview_images[img_id] = preview_img  # 保持引用
+                
+                # 如果是影片，顯示影片標記
+                if ext == '.mp4':
+                    self.preview_canvas.create_text(center_x, 20 + img_height // 2, anchor=tk.CENTER, 
+                                                  text="🎬 影片", font=("Arial", 16, "bold"), 
+                                                  fill="white")
+                
+                # 顯示檔案名稱（在圖片下方）
+                text_y = 20 + img_height + 20
+            else:
+                # 如果無法載入預覽，顯示檔案類型標記
+                file_type = "圖片" if ext in ['.jpg', '.jpeg', '.png'] else "影片" if ext == '.mp4' else "檔案"
+                box_size = 300
+                box_x = center_x - box_size // 2
+                self.preview_canvas.create_rectangle(box_x, 20, box_x + box_size, 20 + box_size, 
+                                                    outline="gray", fill="lightgray", width=2)
+                self.preview_canvas.create_text(center_x, 20 + box_size // 2, anchor=tk.CENTER, 
+                                                text=f"📄 {file_type}", font=("Arial", 16))
+                text_y = 20 + box_size + 20
+            
+            # 顯示檔案名稱（使用標籤以便後續更新）
+            self.preview_canvas.create_text(center_x, text_y, anchor=tk.CENTER, 
+                                          text=f"原檔名: {old_name}", 
+                                          font=("Arial", 11), 
+                                          tags="filename_old")
+            self.preview_canvas.create_text(center_x, text_y + 25, anchor=tk.CENTER, 
+                                          text=f"新檔名: {new_name}", 
+                                          font=("Arial", 11, "bold"), 
+                                          fill="blue", 
+                                          tags="filename_new")
+            
+            # 更新滾動區域
+            self.preview_canvas.update_idletasks()
+            self.preview_canvas.config(scrollregion=self.preview_canvas.bbox("all"))
+            
+        except Exception as e:
+            if not IN_EXE:
+                print(f"顯示預覽錯誤: {e}")
+                import traceback
+                traceback.print_exc()
+            # 發生錯誤時，至少顯示檔案名稱
+            try:
+                # 嘗試生成新檔名
+                try:
+                    new_name = self.generate_new_filename(file_path, index)
+                except:
+                    new_name = "生成失敗"
+                
+                self.preview_canvas.delete("all")
+                center_x = 200
+                self.preview_canvas.create_text(center_x, 100, anchor=tk.CENTER, 
+                                              text=f"原檔名: {old_name}", font=("Arial", 11))
+                self.preview_canvas.create_text(center_x, 125, anchor=tk.CENTER, 
+                                              text=f"新檔名: {new_name}", 
+                                              font=("Arial", 11, "bold"), fill="blue")
+            except:
+                pass
     
     def move_up(self):
         selected = self.file_listbox.curselection()
@@ -1031,13 +1069,15 @@ class FileRenamerGUI:
     def on_rule_change(self):
         # 使用grid或固定位置，避免界面飄移
         if self.rule_var.get() == "character":
+            # 确保 Character 规则参数显示，使用正确的 padx 和 pady
             if not self.char_frame.winfo_viewable():
-                self.char_frame.pack(fill=tk.X, padx=10, pady=5)
+                self.char_frame.pack(fill=tk.X, padx=12, pady=8, before=self.dream_frame if self.dream_frame.winfo_viewable() else None)
             if self.dream_frame.winfo_viewable():
                 self.dream_frame.pack_forget()
         else:
             if self.char_frame.winfo_viewable():
                 self.char_frame.pack_forget()
+            # 确保梦想规则参数显示
             if not self.dream_frame.winfo_viewable():
                 self.dream_frame.pack(fill=tk.X, padx=10, pady=5)
         self.preview_text.delete(1.0, tk.END)
@@ -1060,10 +1100,14 @@ class FileRenamerGUI:
     def on_index_combo_change(self, event, var):
         """當索引下拉框改變時，提取數字部分並更新變數"""
         selected_value = var.get()
-        # 如果包含" - "，提取前面的數字部分
+        # 如果包含" - "，提取前面的數字部分，但不改變顯示值
+        # 保持顯示 "01 - 沒穿" 這樣的格式
         if " - " in selected_value:
             numeric_value = selected_value.split(" - ")[0]
-            var.set(numeric_value)
+            # 不改變 var.set()，保持顯示格式
+            # 只在內部使用數字值
+            pass
+        # 調用預覽更新（不清除預覽狀態，讓異步加載機制自行管理）
         self.on_index_change()
     
     def on_index_change(self, event=None):
@@ -1316,6 +1360,53 @@ class FileRenamerGUI:
             # 處理所有檔案
             return self.selected_files
     
+    def update_text_preview(self):
+        """更新文字預覽"""
+        files_to_process = self.get_files_to_process()
+        if not files_to_process:
+            self.preview_text.delete(1.0, tk.END)
+            return
+        
+        # 文字預覽（包含遊戲引擎標準驗證）
+        self.preview_text.delete(1.0, tk.END)
+        validation_errors = []
+        
+        for i, file_path in enumerate(files_to_process):
+            new_name = self.generate_new_filename(file_path, i)
+            old_name = os.path.basename(file_path)
+            dir_path = os.path.dirname(file_path)
+            new_path = safe_join_path(dir_path, new_name)
+            
+            # 驗證文件名（Character規則使用專用驗證）
+            if self.rule_var.get() == "character":
+                is_valid, error, parsed = validate_character_filename(new_name)
+                if is_valid:
+                    validation_status = "✓"
+                    # 顯示解析的詳細信息
+                    self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                    self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n", "success")
+                    self.preview_text.insert(tk.END, 
+                        f"  角色編號: {parsed['char_id']}, 類型: {parsed['char_type']}, "
+                        f"索引: {parsed['char_index']}, 擴展名: {parsed['ext']}\n")
+                else:
+                    validation_status = "✗"
+                    self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                    self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
+                    self.preview_text.insert(tk.END, f"  ⚠️ 格式驗證失敗: {error}\n", "error")
+                    validation_errors.append(f"{old_name}: {error}")
+            else:
+                # 夢想規則使用遊戲引擎標準驗證
+                is_valid, error = validate_game_engine_filename(new_name)
+                validation_status = "✓" if is_valid else "✗"
+                self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
+                self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
+                if not is_valid:
+                    self.preview_text.insert(tk.END, f"  ⚠️ 驗證失敗: {error}\n", "error")
+                    validation_errors.append(f"{old_name}: {error}")
+            
+            self.preview_text.insert(tk.END, f"完整路徑: {new_path}\n")
+            self.preview_text.insert(tk.END, "-" * 60 + "\n")
+    
     def on_only_selected_change(self):
         """當"僅處理選中項"選項改變時，刷新預覽"""
         # 如果當前有選中的檔案，更新預覽
@@ -1335,58 +1426,8 @@ class FileRenamerGUI:
                         self.show_single_file_preview(file_path, selected_index)
                 else:
                     self.show_single_file_preview(file_path, selected_index)
-        # 同時刷新文字預覽（不顯示警告）
-        files_to_process = self.get_files_to_process()
-        if files_to_process:
-            # 文字預覽（包含遊戲引擎標準驗證）
-            self.preview_text.delete(1.0, tk.END)
-            validation_errors = []
-            
-            for i, file_path in enumerate(files_to_process):
-                new_name = self.generate_new_filename(file_path, i)
-                old_name = os.path.basename(file_path)
-                dir_path = os.path.dirname(file_path)
-                new_path = safe_join_path(dir_path, new_name)
-                
-                # 驗證文件名（Character規則使用專用驗證）
-                if self.rule_var.get() == "character":
-                    is_valid, error, parsed = validate_character_filename(new_name)
-                    if is_valid:
-                        validation_status = "✓"
-                        # 顯示解析的詳細信息
-                        self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
-                        self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n", "success")
-                        self.preview_text.insert(tk.END, 
-                            f"  角色編號: {parsed['char_id']}, 類型: {parsed['char_type']}, "
-                            f"索引: {parsed['char_index']}, 擴展名: {parsed['ext']}\n")
-                    else:
-                        validation_status = "✗"
-                        self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
-                        self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
-                        self.preview_text.insert(tk.END, f"  ⚠️ 格式驗證失敗: {error}\n", "error")
-                        validation_errors.append(f"{old_name}: {error}")
-                else:
-                    # 夢想規則使用遊戲引擎標準驗證
-                    is_valid, error = validate_game_engine_filename(new_name)
-                    validation_status = "✓" if is_valid else "✗"
-                    self.preview_text.insert(tk.END, f"原檔名: {old_name}\n")
-                    self.preview_text.insert(tk.END, f"新檔名: {new_name} {validation_status}\n")
-                    if not is_valid:
-                        self.preview_text.insert(tk.END, f"  ⚠️ 驗證失敗: {error}\n", "error")
-                        validation_errors.append(f"{old_name}: {error}")
-                
-                self.preview_text.insert(tk.END, f"完整路徑: {new_path}\n")
-                self.preview_text.insert(tk.END, "-" * 60 + "\n")
-            
-            # 如果有驗證錯誤，顯示警告
-            if validation_errors:
-                error_msg = "\n".join(validation_errors[:5])
-                if len(validation_errors) > 5:
-                    error_msg += f"\n...還有 {len(validation_errors)-5} 個錯誤"
-                messagebox.showwarning("文件名驗證警告", 
-                    f"以下文件名不符合遊戲引擎標準：\n\n{error_msg}\n\n"
-                    f"文件名只能包含：字母（A-Z, a-z）、數字（0-9）、下劃線（_）、連字符（-）\n"
-                    f"擴展名必須為小寫，文件名長度不能超過128字符")
+        # 同時刷新文字預覽
+        self.update_text_preview()
     
     def preview_rename(self):
         """預覽重新命名結果"""

@@ -47,7 +47,115 @@
 19. **系統文件** - 嘗試重命名系統文件
 20. **不完整操作** - 未完成操作就關閉
 
-## 發現的問題
+## 最新修復（v2.0.0 最終版本）
+
+### 預覽系統重大Bug修復
+
+#### 問題描述
+用戶切換參數（編號、類型、索引等）時，預覽區域的圖片和文件名會消失，需要重新點擊文件才能看到預覽。這嚴重影響了用戶體驗。
+
+#### 根本原因分析
+1. 文件名在 `show_single_file_preview` 函數中預先生成
+2. 異步加載圖片完成後，顯示預先生成的文件名
+3. 如果用戶在圖片加載期間修改了參數，顯示的仍然是舊文件名
+4. 早期的"優化"邏輯在異步加載未完成時會導致預覽完全消失
+
+#### 修復方案
+
+##### 1. 移除不穩定的優化邏輯
+**位置**: `show_single_file_preview()` 第869-893行（已移除）
+
+**問題**: 
+- 當 `current_preview_file == file_path and current_preview_index == index` 時
+- 只更新文件名，不重新加載圖片
+- 如果異步加載還沒完成，`items` 為空，文件名不會顯示
+- 然後就 `return` 了，導致預覽完全消失
+
+**修復**: 總是完全重新加載預覽，確保絕對穩定
+
+##### 2. 實現實時文件名生成
+**位置**: `_display_preview()` 第945-946行
+
+**原方案**: 
+```python
+def show_single_file_preview(self, file_path, index):
+    new_name = self.generate_new_filename(file_path, index)  # 預先生成
+    self._load_preview_image_async(file_path, new_name, ...)  # 傳遞預生成的名稱
+```
+
+**新方案**:
+```python
+def show_single_file_preview(self, file_path, index):
+    self._load_preview_image_async(file_path, old_name, ext, index)  # 只傳遞必要信息
+
+def _display_preview(self, ..., file_path, index, load_id):
+    new_name = self.generate_new_filename(file_path, index)  # 實時生成
+```
+
+##### 3. 添加並發控制機制
+**位置**: `_load_preview_image_async()` 和 `_display_preview()`
+
+**實現**:
+```python
+# 生成唯一的加載ID
+load_id = f"{file_path}_{index}_{time.time()}"
+self.current_load_id = load_id
+
+# 顯示時雙重檢查
+if self.current_load_id != load_id:
+    return  # 過時的請求，忽略
+if self.current_preview_file != file_path:
+    return  # 文件已改變，忽略
+```
+
+##### 4. 完善異常處理
+**位置**: `_display_preview()` 第1003-1024行
+
+**特性**:
+- 圖片加載失敗：顯示文件類型標記
+- 預覽顯示失敗：至少顯示文件名
+- 完整的 try-except 保護
+- EXE模式下隱藏調試信息
+
+#### 測試結果
+
+✅ **場景1：切換參數**
+- 編號：01 → 02 → 03 ✓ 預覽實時更新
+- 類型：Idle → Intro → Open ✓ 預覽實時更新
+- 索引：01 → 05 → 10 ✓ 預覽實時更新
+
+✅ **場景2：快速連續切換**
+- 快速切換10次參數 ✓ 最終顯示最新預覽
+- 無混亂或錯誤 ✓ 
+
+✅ **場景3：異步加載中切換**
+- 圖片加載中切換參數 ✓ 新預覽正確顯示
+- 舊預覽被正確忽略 ✓
+
+✅ **場景4：點擊不同文件**
+- 切換文件 ✓ 正確顯示新文件預覽
+- 舊文件預覽被正確清除 ✓
+
+✅ **場景5：異常情況**
+- 圖片加載失敗 ✓ 顯示文件類型標記
+- 文件不存在 ✓ 顯示錯誤提示
+- 權限不足 ✓ 正確處理錯誤
+
+#### 性能改進
+- 異步加載：圖片加載不阻塞UI
+- 過時請求忽略：快速切換時不浪費資源
+- 資源清理：舊圖片立即釋放內存
+- 防抖機制：100ms內的多次更新合併為一次
+
+#### 代碼質量
+- ✅ 無 Linter 錯誤
+- ✅ 完整的異常處理
+- ✅ 清晰的代碼註釋
+- ✅ 工業級並發控制
+
+---
+
+## 發現的問題（已全部修復）
 
 ### 已修復的問題
 

@@ -33,10 +33,14 @@ pyinstaller --name="檔案重新命名工具" ^
     --windowed ^
     --icon=NONE ^
     --add-data "file_renamer.py;." ^
+    --add-data "config.py;." ^
+    --add-data "utils.py;." ^
     --hidden-import=tkinterdnd2 ^
     --hidden-import=PIL ^
     --hidden-import=PIL.Image ^
     --hidden-import=PIL.ImageTk ^
+    --hidden-import=config ^
+    --hidden-import=utils ^
     --collect-all tkinterdnd2 ^
     --collect-all PIL ^
     file_renamer.py

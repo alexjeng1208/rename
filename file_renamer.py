@@ -3,6 +3,39 @@ from tkinter import ttk, filedialog, messagebox
 import os
 from pathlib import Path
 import sys
+import threading
+from datetime import datetime
+
+# 匯入配置和工具模組
+try:
+    from config import (
+        config_manager, COLOR_MAP, CHAR_TYPES, THEMES,
+        SUPPORTED_EXTENSIONS, VALID_EXTENSIONS_PATTERNS,
+        APP_NAME, DEFAULT_WINDOW_SIZE
+    )
+    from utils import HistoryManager, format_file_size, get_file_info
+except ImportError:
+    # 如果模組匯入失敗，使用預設值（確保能打包成EXE）
+    print("警告：無法匯入配置模組，使用預設配置")
+    COLOR_MAP = {
+        "00": ("沒穿", "nude"), "01": ("黑色", "black"), "02": ("白色", "white"),
+        "03": ("綠色", "green"), "04": ("紅色", "red"), "05": ("黃色", "yellow"),
+        "06": ("藍色", "blue")
+    }
+    CHAR_TYPES = ["Idle", "Intro", "Open"]
+    THEMES = {
+        "Hospital": ["H_Girlfriend", "H_Sister", "H_Cute", "H_Cool", "H_Motherly"],
+        "BDSM": ["SM_Sister", "SM_Girlfriend"],
+        "Bedroom": ["B_Cute_G", "B_Sister", "B_Cool_G", "B_M"],
+        "Anime": ["A_編號"]
+    }
+    SUPPORTED_EXTENSIONS = ['.mp4', '.jpg', '.jpeg', '.png']
+    VALID_EXTENSIONS_PATTERNS = ['*.mp4', '*.jpg', '*.jpeg', '*.png']
+    APP_NAME = "檔案重新命名工具"
+    DEFAULT_WINDOW_SIZE = "1200x1000"
+    config_manager = None
+    HistoryManager = None
+
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
@@ -17,7 +50,6 @@ except ImportError:
     HAS_PIL = False
     print("提示：未安裝Pillow，圖片預覽功能將受限。可使用 pip install Pillow 安裝")
 
-
 # 檢查tkinter是否可用
 try:
     import tkinter
@@ -29,23 +61,38 @@ except ImportError:
 class FileRenamerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("檔案重新命名工具")
-        self.root.geometry("1200x1000")
+        self.root.title(APP_NAME)
+        
+        # 載入儲存的視窗大小和位置
+        if config_manager:
+            saved_geometry = config_manager.get("window_geometry", DEFAULT_WINDOW_SIZE)
+            self.root.geometry(saved_geometry)
+        else:
+            self.root.geometry(DEFAULT_WINDOW_SIZE)
         
         self.selected_files = []
         self.file_char_id_map = {}  # 儲存每個檔案的角色編號設定
         self.preview_images = {}  # 儲存預覽圖片
-        self.color_map = {
-            "00": ("沒穿", "nude"),
-            "01": ("黑色", "black"),
-            "02": ("白色", "white"),
-            "03": ("綠色", "green"),
-            "04": ("紅色", "red"),
-            "05": ("黃色", "yellow"),
-            "06": ("藍色", "blue")
-        }
+        self.color_map = COLOR_MAP
+        self.rename_history = []  # 重命名歷史，用於撤銷
+        self.dark_mode = False
+        
+        # 初始化歷史管理器
+        if HistoryManager:
+            self.history_manager = HistoryManager()
+        else:
+            self.history_manager = None
+        
+        # 搜尋過濾
+        self.search_filter = ""
+        
         self.setup_ui()
         self.setup_drag_drop()
+        self.setup_keyboard_shortcuts()
+        self.load_saved_settings()
+        
+        # 綁定視窗關閉事件，儲存設定
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_ui(self):
         # 選擇檔案區域
@@ -99,6 +146,16 @@ class FileRenamerGUI:
         ttk.Checkbutton(list_control_frame, text="僅處理選中的檔案（多選時按順序自動排序命名）", 
                        variable=self.only_selected_var,
                        command=self.on_only_selected_change).pack(side=tk.LEFT, padx=10)
+        
+        # 搜索框
+        search_frame = ttk.Frame(list_frame)
+        search_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(search_frame, text="搜尋:").pack(side=tk.LEFT, padx=5)
+        self.search_var = tk.StringVar()
+        self.search_var.trace('w', lambda *args: self.filter_file_list())
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
+        self.search_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(search_frame, text="清除", command=lambda: self.search_var.set("")).pack(side=tk.LEFT, padx=2)
         
         scrollbar = ttk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -272,8 +329,21 @@ class FileRenamerGUI:
         button_frame = ttk.Frame(self.root)
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        ttk.Button(button_frame, text="預覽重新命名", command=self.preview_rename).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="執行重新命名", command=self.execute_rename).pack(side=tk.LEFT, padx=5)
+        preview_btn = ttk.Button(button_frame, text="預覽重新命名 (Ctrl+R)", command=self.preview_rename)
+        preview_btn.pack(side=tk.LEFT, padx=5)
+        self.create_tooltip(preview_btn, "預覽重新命名結果 (快捷鍵: Ctrl+R)")
+        
+        execute_btn = ttk.Button(button_frame, text="執行重新命名 (Ctrl+Enter)", command=self.execute_rename)
+        execute_btn.pack(side=tk.LEFT, padx=5)
+        self.create_tooltip(execute_btn, "執行重新命名操作 (快捷鍵: Ctrl+Enter)")
+        
+        undo_btn = ttk.Button(button_frame, text="撤銷 (Ctrl+Z)", command=self.undo_rename)
+        undo_btn.pack(side=tk.LEFT, padx=5)
+        self.create_tooltip(undo_btn, "撤銷最後一次重命名操作 (快捷鍵: Ctrl+Z)")
+        
+        dark_mode_btn = ttk.Button(button_frame, text="深色模式 (Ctrl+T)", command=self.toggle_dark_mode)
+        dark_mode_btn.pack(side=tk.LEFT, padx=5)
+        self.create_tooltip(dark_mode_btn, "切換深色/淺色模式 (快捷鍵: Ctrl+T)")
         
         # 初始顯示
         self.on_rule_change()
@@ -403,12 +473,23 @@ class FileRenamerGUI:
         self.preview_text.delete(1.0, tk.END)
         self.clear_image_preview()
     
-    def update_file_list(self):
+    def filter_file_list(self):
+        """根據搜尋過濾檔案列表"""
+        search_text = self.search_var.get().lower() if hasattr(self, 'search_var') else ""
         self.file_listbox.delete(0, tk.END)
+        filtered_count = 0
         for file_path in self.selected_files:
-            self.file_listbox.insert(tk.END, os.path.basename(file_path))
+            file_name = os.path.basename(file_path).lower()
+            if not search_text or search_text in file_name:
+                self.file_listbox.insert(tk.END, os.path.basename(file_path))
+                filtered_count += 1
         # 更新當前數量顯示
-        self.current_count_label.config(text=str(len(self.selected_files)))
+        if hasattr(self, 'current_count_label'):
+            self.current_count_label.config(text=f"{filtered_count}/{len(self.selected_files)}")
+    
+    def update_file_list(self):
+        """更新檔案列表"""
+        self.filter_file_list()
     
     def check_max_files_limit(self, new_files_count):
         """檢查是否超過最大選擇數量限制"""
@@ -884,21 +965,55 @@ class FileRenamerGUI:
         if not result:
             return
         
+        # 建立進度視窗
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("正在重新命名...")
+        progress_window.geometry("400x100")
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+        
+        progress_label = ttk.Label(progress_window, text="正在處理...")
+        progress_label.pack(pady=10)
+        
+        progress_bar = ttk.Progressbar(progress_window, length=350, mode='determinate')
+        progress_bar.pack(pady=10)
+        progress_bar['maximum'] = len(rename_list)
+        
         # 執行重新命名
         success_count = 0
         error_count = 0
         errors = []
         
-        for old_path, new_path in rename_list:
+        for i, (old_path, new_path) in enumerate(rename_list):
             try:
                 if os.path.exists(new_path) and new_path != old_path:
                     # 如果目標檔案存在且不是同一個檔案，跳過（應該已經處理過了）
                     continue
                 os.rename(old_path, new_path)
                 success_count += 1
+                
+                # 記錄歷史
+                self.rename_history.append({
+                    'old_path': old_path,
+                    'new_path': new_path,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+                # 更新歷史管理器
+                if self.history_manager:
+                    self.history_manager.add_record(old_path, new_path)
+                
             except Exception as e:
                 error_count += 1
                 errors.append(f"{os.path.basename(old_path)}: {str(e)}")
+            
+            # 更新進度條
+            progress_bar['value'] = i + 1
+            progress_label.config(text=f"正在處理 {i+1}/{len(rename_list)}...")
+            progress_window.update()
+        
+        # 關閉進度視窗
+        progress_window.destroy()
         
         # 顯示結果
         message = f"重新命名完成！\n成功: {success_count} 個\n失敗: {error_count} 個"
@@ -984,6 +1099,191 @@ class FileRenamerGUI:
             setup_window.destroy()
         
         ttk.Button(setup_window, text="應用設定", command=apply_settings).pack(pady=10)
+    
+    def setup_keyboard_shortcuts(self):
+        """設定鍵盤快捷鍵"""
+        # Ctrl+O: 選擇檔案
+        self.root.bind('<Control-o>', lambda e: self.select_files())
+        # Ctrl+D: 選擇資料夾
+        self.root.bind('<Control-d>', lambda e: self.select_folder())
+        # Delete: 刪除選中
+        self.root.bind('<Delete>', lambda e: self.remove_selected())
+        # Ctrl+F: 搜尋
+        self.root.bind('<Control-f>', lambda e: self.focus_search())
+        # Ctrl+Z: 撤銷
+        self.root.bind('<Control-z>', lambda e: self.undo_rename())
+        # Ctrl+R: 預覽重命名
+        self.root.bind('<Control-r>', lambda e: self.preview_rename())
+        # Ctrl+Enter: 執行重命名
+        self.root.bind('<Control-Return>', lambda e: self.execute_rename())
+        # Ctrl+T: 切換深色模式
+        self.root.bind('<Control-t>', lambda e: self.toggle_dark_mode())
+    
+    def load_saved_settings(self):
+        """載入儲存的設定"""
+        if not config_manager:
+            return
+        
+        # 載入命名規則設定
+        last_rule = config_manager.get("last_rule", "character")
+        if last_rule:
+            self.rule_var.set(last_rule)
+            self.on_rule_change()
+        
+        # 載入Character規則設定
+        if hasattr(self, 'char_id_var'):
+            self.char_id_var.set(config_manager.get("last_char_id", "01"))
+            self.char_type_var.set(config_manager.get("last_char_type", "Idle"))
+            self.char_index_var.set(config_manager.get("last_char_index", "01"))
+            self.color_var.set(config_manager.get("last_color", "00"))
+        
+        # 載入夢想規則設定
+        if hasattr(self, 'theme_var'):
+            self.theme_var.set(config_manager.get("last_theme", "Hospital"))
+            self.on_theme_change()
+            self.dream_index_var.set(config_manager.get("last_dream_index", "01"))
+            self.anime_num_var.set(config_manager.get("last_anime_num", "01"))
+        
+        # 載入最大檔案數限制
+        if hasattr(self, 'max_files_var'):
+            self.max_files_var.set(config_manager.get("max_files", "0"))
+        
+        # 載入深色模式
+        dark_mode = config_manager.get("dark_mode", False)
+        if dark_mode:
+            self.toggle_dark_mode()
+    
+    def save_settings(self):
+        """儲存當前設定"""
+        if not config_manager:
+            return
+        
+        # 儲存視窗大小和位置
+        config_manager.set("window_geometry", self.root.geometry())
+        
+        # 儲存命名規則設定
+        config_manager.set("last_rule", self.rule_var.get())
+        
+        # 儲存Character規則設定
+        if hasattr(self, 'char_id_var'):
+            config_manager.set("last_char_id", self.char_id_var.get())
+            config_manager.set("last_char_type", self.char_type_var.get())
+            config_manager.set("last_char_index", self.char_index_var.get())
+            config_manager.set("last_color", self.color_var.get())
+        
+        # 儲存夢想規則設定
+        if hasattr(self, 'theme_var'):
+            config_manager.set("last_theme", self.theme_var.get())
+            config_manager.set("last_role", self.role_var.get() if hasattr(self, 'role_var') else "")
+            config_manager.set("last_dream_index", self.dream_index_var.get() if hasattr(self, 'dream_index_var') else "01")
+            config_manager.set("last_anime_num", self.anime_num_var.get() if hasattr(self, 'anime_num_var') else "01")
+        
+        # 儲存最大檔案數限制
+        if hasattr(self, 'max_files_var'):
+            config_manager.set("max_files", self.max_files_var.get())
+        
+        # 儲存深色模式
+        config_manager.set("dark_mode", self.dark_mode)
+        
+        config_manager.save_config()
+    
+    def on_closing(self):
+        """視窗關閉時的處理"""
+        self.save_settings()
+        self.root.destroy()
+    
+    def undo_rename(self):
+        """撤銷最後一次重命名操作"""
+        if not self.rename_history:
+            messagebox.showinfo("提示", "沒有可撤銷的操作")
+            return
+        
+        # 獲取最後一次重命名記錄
+        last_rename = self.rename_history.pop()
+        old_path = last_rename['new_path']
+        new_path = last_rename['old_path']
+        
+        try:
+            if os.path.exists(old_path):
+                os.rename(old_path, new_path)
+                messagebox.showinfo("成功", f"已撤銷重命名：\n{os.path.basename(old_path)} -> {os.path.basename(new_path)}")
+                # 更新歷史記錄
+                if self.history_manager:
+                    self.history_manager.add_record(old_path, new_path)
+                # 重新整理檔案列表
+                self.update_file_list()
+            else:
+                messagebox.showwarning("警告", "檔案不存在，無法撤銷")
+        except Exception as e:
+            messagebox.showerror("錯誤", f"撤銷失敗：{str(e)}")
+    
+    def focus_search(self):
+        """聚焦到搜尋框"""
+        if hasattr(self, 'search_entry'):
+            self.search_entry.focus()
+    
+    def toggle_dark_mode(self):
+        """切換深色模式"""
+        self.dark_mode = not self.dark_mode
+        
+        if self.dark_mode:
+            # 深色模式顏色
+            bg_color = "#2b2b2b"
+            fg_color = "#ffffff"
+            select_bg = "#404040"
+            select_fg = "#ffffff"
+        else:
+            # 淺色模式顏色
+            bg_color = "#f0f0f0"
+            fg_color = "#000000"
+            select_bg = "#0078d4"
+            select_fg = "#ffffff"
+        
+        # 更新主視窗背景
+        self.root.configure(bg=bg_color)
+        
+        # 更新Listbox樣式
+        if hasattr(self, 'file_listbox'):
+            self.file_listbox.configure(
+                bg=bg_color if not self.dark_mode else "#1e1e1e",
+                fg=fg_color,
+                selectbackground=select_bg,
+                selectforeground=select_fg
+            )
+        
+        # 更新Text元件樣式
+        if hasattr(self, 'preview_text'):
+            self.preview_text.configure(
+                bg=bg_color if not self.dark_mode else "#1e1e1e",
+                fg=fg_color,
+                insertbackground=fg_color
+            )
+        
+        # 儲存設定
+        if config_manager:
+            config_manager.set("dark_mode", self.dark_mode)
+            config_manager.save_config()
+        
+        messagebox.showinfo("提示", f"已切換到{'深色' if self.dark_mode else '淺色'}模式")
+    
+    def create_tooltip(self, widget, text):
+        """建立工具提示"""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            label = tk.Label(tooltip, text=text, background="#ffffe0", 
+                           relief=tk.SOLID, borderwidth=1, font=("Arial", 9))
+            label.pack()
+            widget.tooltip = tooltip
+        
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        widget.bind('<Enter>', on_enter)
+        widget.bind('<Leave>', on_leave)
 
 
 def main():
